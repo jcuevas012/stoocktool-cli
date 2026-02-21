@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stocktool"
+version = "0.1.0"
+description = "Stock market mid-term analysis and portfolio tracker"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.40",
+    "typer[all]>=0.12.0",
+    "rich>=13.7.0",
+    "pandas>=2.1.0",
+]
+
+[project.scripts]
+stocktool = "stocktool.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stocktool*"]
