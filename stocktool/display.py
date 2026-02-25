@@ -107,6 +107,7 @@ def render_portfolio_summary(snapshot: PortfolioSnapshot) -> None:
         show_footer=True,
     )
     table.add_column("Ticker", style="bold")
+    table.add_column("Type", style="dim")
     table.add_column("Shares", justify="right")
     table.add_column("Cost/Share", justify="right")
     table.add_column("Price", justify="right")
@@ -116,33 +117,58 @@ def render_portfolio_summary(snapshot: PortfolioSnapshot) -> None:
     table.add_column("P&L %", justify="right")
     table.add_column("Weight", justify="right")
 
-    for ps in snapshot.positions:
-        pnl_color = "green" if ps.unrealized_pnl >= 0 else "red"
-        pnl_sign = "+" if ps.unrealized_pnl >= 0 else ""
-        pnl_pct_sign = "+" if ps.unrealized_pnl_pct >= 0 else ""
-        table.add_row(
-            ps.ticker,
-            f"{ps.shares:.4f}",
-            f"${ps.cost_basis:.2f}",
-            f"${ps.current_price:.2f}",
-            f"${ps.market_value:,.2f}",
-            f"${ps.cost_value:,.2f}",
-            Text(f"{pnl_sign}${ps.unrealized_pnl:,.2f}", style=pnl_color),
-            Text(f"{pnl_pct_sign}{ps.unrealized_pnl_pct:.2f}%", style=pnl_color),
-            f"{ps.current_weight:.1f}%",
-        )
+    stock_positions = [ps for ps in snapshot.positions if not ps.is_etf]
+    etf_positions = [ps for ps in snapshot.positions if ps.is_etf]
+
+    def _add_group(positions, group_label):
+        for ps in positions:
+            pnl_color = "green" if ps.unrealized_pnl >= 0 else "red"
+            pnl_sign = "+" if ps.unrealized_pnl >= 0 else ""
+            pnl_pct_sign = "+" if ps.unrealized_pnl_pct >= 0 else ""
+            table.add_row(
+                ps.ticker,
+                "ETF" if ps.is_etf else "Stock",
+                f"{ps.shares:.4f}",
+                f"${ps.cost_basis:.2f}",
+                f"${ps.current_price:.2f}",
+                f"${ps.market_value:,.2f}",
+                f"${ps.cost_value:,.2f}",
+                Text(f"{pnl_sign}${ps.unrealized_pnl:,.2f}", style=pnl_color),
+                Text(f"{pnl_pct_sign}{ps.unrealized_pnl_pct:.2f}%", style=pnl_color),
+                f"{ps.current_weight:.1f}%",
+            )
+        # Sub-total row if both types exist
+        if positions and (stock_positions and etf_positions):
+            grp_mv = sum(p.market_value for p in positions)
+            grp_cv = sum(p.cost_value for p in positions)
+            grp_pnl = grp_mv - grp_cv
+            grp_pnl_pct = (grp_pnl / grp_cv * 100) if grp_cv else 0.0
+            grp_weight = sum(p.current_weight for p in positions)
+            pc = "green" if grp_pnl >= 0 else "red"
+            table.add_row(
+                Text(f"  {group_label} Subtotal", style="bold dim"),
+                "", "", "", "",
+                Text(f"${grp_mv:,.2f}", style="bold"),
+                Text(f"${grp_cv:,.2f}", style="bold"),
+                Text(f"{'+'if grp_pnl>=0 else ''}${grp_pnl:,.2f}", style=f"bold {pc}"),
+                Text(f"{'+'if grp_pnl_pct>=0 else ''}{grp_pnl_pct:.2f}%", style=f"bold {pc}"),
+                Text(f"{grp_weight:.1f}%", style="bold"),
+            )
+
+    _add_group(stock_positions, "Stocks")
+    _add_group(etf_positions, "ETFs")
 
     total_pnl_color = "green" if snapshot.total_unrealized_pnl >= 0 else "red"
     total_sign = "+" if snapshot.total_unrealized_pnl >= 0 else ""
     total_pct_sign = "+" if snapshot.total_unrealized_pnl_pct >= 0 else ""
 
     table.columns[0].footer = Text("TOTAL", style="bold")
-    table.columns[4].footer = Text(f"${snapshot.total_market_value:,.2f}", style="bold")
-    table.columns[5].footer = Text(f"${snapshot.total_cost_value:,.2f}", style="bold")
-    table.columns[6].footer = Text(
+    table.columns[5].footer = Text(f"${snapshot.total_market_value:,.2f}", style="bold")
+    table.columns[6].footer = Text(f"${snapshot.total_cost_value:,.2f}", style="bold")
+    table.columns[7].footer = Text(
         f"{total_sign}${snapshot.total_unrealized_pnl:,.2f}", style=f"bold {total_pnl_color}"
     )
-    table.columns[7].footer = Text(
+    table.columns[8].footer = Text(
         f"{total_pct_sign}{snapshot.total_unrealized_pnl_pct:.2f}%",
         style=f"bold {total_pnl_color}",
     )
@@ -154,6 +180,7 @@ def render_allocation(snapshot: PortfolioSnapshot) -> None:
     # Ticker allocation table
     alloc_table = Table(title="Allocation", show_lines=True, header_style="bold cyan")
     alloc_table.add_column("Ticker", style="bold")
+    alloc_table.add_column("Type", style="dim")
     alloc_table.add_column("Sector")
     alloc_table.add_column("Current Weight", justify="right")
     alloc_table.add_column("Target Weight", justify="right")
@@ -172,6 +199,7 @@ def render_allocation(snapshot: PortfolioSnapshot) -> None:
 
         alloc_table.add_row(
             ps.ticker,
+            "ETF" if ps.is_etf else "Stock",
             ps.sector or "Unknown",
             f"{ps.current_weight:.1f}%",
             target_text,
@@ -190,6 +218,17 @@ def render_allocation(snapshot: PortfolioSnapshot) -> None:
             sector_table.add_row(sector, f"{weight:.1f}%")
 
         console.print(sector_table)
+
+    # Type breakdown (ETF vs Stock)
+    if snapshot.type_allocation and len(snapshot.type_allocation) > 1:
+        type_table = Table(title="Type Breakdown", show_lines=True, header_style="bold cyan")
+        type_table.add_column("Type", style="bold")
+        type_table.add_column("Weight", justify="right")
+
+        for type_name, weight in sorted(snapshot.type_allocation.items()):
+            type_table.add_row(type_name, f"{weight:.1f}%")
+
+        console.print(type_table)
 
 
 def render_rebalancing_signals(snapshot: PortfolioSnapshot) -> None:
@@ -474,6 +513,532 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         border_style="cyan",
         padding=(0, 1),
     ))
+
+
+def render_sma_screen(sma_data: dict[str, dict], sma_days: int = 200) -> None:
+    """Show portfolio positions vs their SMA, highlighting those trading below."""
+    if not sma_data:
+        console.print("[yellow]No SMA data available (need at least 200 trading days of history).[/yellow]")
+        return
+
+    below: list[tuple[str, dict]] = []
+    above: list[tuple[str, dict]] = []
+    for ticker, d in sorted(sma_data.items()):
+        if d["pct_from_sma"] < 0:
+            below.append((ticker, d))
+        else:
+            above.append((ticker, d))
+
+    table = Table(
+        title=f"Portfolio — {sma_days}-Day SMA Screen",
+        show_lines=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Ticker", style="bold")
+    table.add_column("Price", justify="right")
+    table.add_column(f"{sma_days}d SMA", justify="right")
+    table.add_column("vs SMA", justify="right")
+    table.add_column("Signal", justify="center")
+
+    # Below SMA first (the opportunities)
+    for ticker, d in below:
+        pct = d["pct_from_sma"]
+        table.add_row(
+            ticker,
+            f"${d['current_price']:.2f}",
+            f"${d['sma']:.2f}",
+            Text(f"{pct:+.2f}%", style="red"),
+            Text("BELOW SMA", style="bold yellow"),
+        )
+    for ticker, d in above:
+        pct = d["pct_from_sma"]
+        table.add_row(
+            ticker,
+            f"${d['current_price']:.2f}",
+            f"${d['sma']:.2f}",
+            Text(f"{pct:+.2f}%", style="green"),
+            Text("ABOVE SMA", style="dim"),
+        )
+
+    console.print(table)
+
+    if below:
+        tickers_str = ", ".join(t for t, _ in below)
+        console.print(Panel(
+            f"[bold yellow]{len(below)} position(s) trading below {sma_days}d SMA:[/bold yellow] {tickers_str}\n"
+            f"[dim]↳ Price is below the long-term average — may signal a buying opportunity for value investors.\n"
+            f"  Check fundamentals before adding. Use: stocktool valuation {below[0][0]}[/dim]",
+            title=f"[bold yellow]Below {sma_days}-Day SMA[/bold yellow]",
+            border_style="yellow",
+        ))
+    else:
+        console.print(Panel(
+            f"[green]All positions are trading above their {sma_days}-day SMA.[/green]\n"
+            f"[dim]↳ No positions are currently in a long-term downtrend.[/dim]",
+            border_style="green",
+        ))
+
+
+def render_pie_chart(
+    snapshot: PortfolioSnapshot,
+    save_path: Optional[str] = None,
+) -> None:
+    """Render portfolio allocation as a terminal bar chart and save a PNG pie chart."""
+    from .config import CONFIG_DIR, ensure_config_dir
+
+    # ── Terminal: horizontal bar chart ──────────────────────────────────
+    BAR_WIDTH = 30
+    colors = ["cyan", "green", "yellow", "magenta", "blue", "red", "white"]
+
+    # Ticker allocation bar chart
+    table = Table(
+        title="Portfolio Allocation",
+        show_lines=False,
+        header_style="bold cyan",
+        box=None,
+        padding=(0, 1),
+    )
+    table.add_column("Ticker", style="bold", min_width=8)
+    table.add_column("Weight", justify="right", min_width=8)
+    table.add_column("", min_width=BAR_WIDTH + 2)
+
+    sorted_positions = sorted(snapshot.positions, key=lambda p: -p.current_weight)
+    for i, ps in enumerate(sorted_positions):
+        color = colors[i % len(colors)]
+        bar_len = int(ps.current_weight / 100 * BAR_WIDTH)
+        bar = Text("█" * bar_len, style=color)
+        table.add_row(ps.ticker, f"{ps.current_weight:.1f}%", bar)
+
+    console.print(table)
+    console.print()
+
+    # Sector allocation bar chart
+    if snapshot.sector_allocation:
+        sec_table = Table(
+            title="Sector Allocation",
+            show_lines=False,
+            header_style="bold cyan",
+            box=None,
+            padding=(0, 1),
+        )
+        sec_table.add_column("Sector", style="bold", min_width=20)
+        sec_table.add_column("Weight", justify="right", min_width=8)
+        sec_table.add_column("", min_width=BAR_WIDTH + 2)
+
+        sorted_sectors = sorted(snapshot.sector_allocation.items(), key=lambda x: -x[1])
+        for i, (sector, weight) in enumerate(sorted_sectors):
+            color = colors[i % len(colors)]
+            bar_len = int(weight / 100 * BAR_WIDTH)
+            bar = Text("█" * bar_len, style=color)
+            sec_table.add_row(sector, f"{weight:.1f}%", bar)
+
+        console.print(sec_table)
+        console.print()
+
+    # Type allocation bar chart (ETF vs Stock)
+    has_type = snapshot.type_allocation and len(snapshot.type_allocation) > 1
+    if has_type:
+        type_table = Table(
+            title="ETF vs Stock",
+            show_lines=False,
+            header_style="bold cyan",
+            box=None,
+            padding=(0, 1),
+        )
+        type_table.add_column("Type", style="bold", min_width=8)
+        type_table.add_column("Weight", justify="right", min_width=8)
+        type_table.add_column("", min_width=BAR_WIDTH + 2)
+
+        type_colors = {"Stock": "green", "ETF": "blue"}
+        for type_name, weight in sorted(snapshot.type_allocation.items()):
+            color = type_colors.get(type_name, "white")
+            bar_len = int(weight / 100 * BAR_WIDTH)
+            bar = Text("█" * bar_len, style=color)
+            type_table.add_row(type_name, f"{weight:.1f}%", bar)
+
+        console.print(type_table)
+        console.print()
+
+    # ── PNG: matplotlib pie charts ──────────────────────────────────────
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        num_charts = 1
+        if snapshot.sector_allocation:
+            num_charts += 1
+        if has_type:
+            num_charts += 1
+
+        fig, axes = plt.subplots(1, num_charts, figsize=(7 * num_charts, 7))
+        if num_charts == 1:
+            axes = [axes]
+
+        ax_idx = 0
+
+        # Ticker pie
+        labels = [ps.ticker for ps in sorted_positions]
+        sizes = [ps.current_weight for ps in sorted_positions]
+        axes[ax_idx].pie(sizes, labels=labels, autopct="%1.1f%%", startangle=140)
+        axes[ax_idx].set_title("Ticker Allocation")
+        ax_idx += 1
+
+        # Sector pie
+        if snapshot.sector_allocation:
+            sec_labels = [s for s, _ in sorted_sectors]
+            sec_sizes = [w for _, w in sorted_sectors]
+            axes[ax_idx].pie(sec_sizes, labels=sec_labels, autopct="%1.1f%%", startangle=140)
+            axes[ax_idx].set_title("Sector Allocation")
+            ax_idx += 1
+
+        # Type pie (ETF vs Stock)
+        if has_type:
+            type_labels = list(snapshot.type_allocation.keys())
+            type_sizes = list(snapshot.type_allocation.values())
+            axes[ax_idx].pie(type_sizes, labels=type_labels, autopct="%1.1f%%",
+                             startangle=140, colors=["#4CAF50", "#2196F3"])
+            axes[ax_idx].set_title("ETF vs Stock")
+
+        plt.tight_layout()
+
+        ensure_config_dir()
+        out_path = save_path or str(CONFIG_DIR / "portfolio_allocation.png")
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        console.print(f"[dim]Pie chart saved to {out_path}[/dim]")
+    except ImportError:
+        console.print("[dim]Install matplotlib for PNG pie chart export.[/dim]")
+
+
+def render_etf_compare(
+    etf_info: dict[str, dict],
+    performance: dict[str, dict[str, float]],
+    overlap: dict[str, list[str]],
+) -> None:
+    """Render ETF comparison: overview, holdings, overlap, sectors, performance."""
+    tickers = list(etf_info.keys())
+
+    # ── Overview Table ──
+    overview = Table(title="ETF Comparison", show_lines=True, header_style="bold cyan")
+    overview.add_column("Metric", style="bold", min_width=20)
+    for t in tickers:
+        overview.add_column(t, justify="right", min_width=14)
+
+    overview.add_row("Name", *[etf_info[t].get("long_name", "N/A") or "N/A" for t in tickers])
+    overview.add_row("Expense Ratio", *[_fmt_pct(etf_info[t].get("expense_ratio")) for t in tickers])
+    overview.add_row("AUM", *[_fmt_large(etf_info[t].get("total_assets")) for t in tickers])
+    overview.add_row("Div Yield (trailing)", *[_fmt_pct(etf_info[t].get("trailing_dividend_yield")) for t in tickers])
+    overview.add_row("Fund Family", *[etf_info[t].get("fund_family", "N/A") or "N/A" for t in tickers])
+    console.print(overview)
+
+    # ── Performance Table ──
+    perf_table = Table(title="Price Performance", show_lines=True, header_style="bold cyan")
+    perf_table.add_column("Period", style="bold")
+    for t in tickers:
+        perf_table.add_column(t, justify="right")
+
+    for period in ["1m", "3m", "6m", "1y", "3y", "5y"]:
+        cells: list = [period.upper()]
+        for t in tickers:
+            val = performance.get(t, {}).get(period)
+            if val is not None:
+                color = "green" if val >= 0 else "red"
+                cells.append(Text(f"{val:+.2f}%", style=color))
+            else:
+                cells.append(Text("N/A", style="dim"))
+        perf_table.add_row(*cells)
+    console.print(perf_table)
+
+    # ── Top 10 Holdings per ETF ──
+    for t in tickers:
+        holdings = etf_info[t].get("holdings", [])[:10]
+        if not holdings:
+            continue
+        h_table = Table(title=f"Top Holdings: {t}", show_lines=True, header_style="bold cyan")
+        h_table.add_column("#", style="dim", width=3)
+        h_table.add_column("Symbol", style="bold")
+        h_table.add_column("Name")
+        h_table.add_column("Weight", justify="right")
+        for i, h in enumerate(holdings, 1):
+            pct = h.get("holdingPercent")
+            pct_str = f"{pct * 100:.2f}%" if pct else "N/A"
+            h_table.add_row(
+                str(i),
+                h.get("symbol", "N/A"),
+                h.get("holdingName", "N/A"),
+                pct_str,
+            )
+        console.print(h_table)
+
+    # ── Holdings Overlap ──
+    if overlap:
+        o_table = Table(title="Holdings Overlap", show_lines=True, header_style="bold yellow")
+        o_table.add_column("Stock", style="bold")
+        o_table.add_column("Found In", min_width=20)
+        o_table.add_column("# ETFs", justify="right")
+
+        sorted_overlap = sorted(overlap.items(), key=lambda x: -len(x[1]))
+        for symbol, etf_list in sorted_overlap:
+            o_table.add_row(symbol, ", ".join(etf_list), str(len(etf_list)))
+
+        total_unique = set()
+        for t in tickers:
+            for h in etf_info[t].get("holdings", []):
+                s = h.get("symbol", "").upper()
+                if s:
+                    total_unique.add(s)
+        overlap_pct = len(overlap) / len(total_unique) * 100 if total_unique else 0
+
+        console.print(o_table)
+        console.print(
+            f"[dim]Overlap: {len(overlap)} of {len(total_unique)} unique holdings "
+            f"({overlap_pct:.1f}%) appear in 2+ ETFs[/dim]"
+        )
+        console.print("[dim]Note: Based on top holdings reported by yfinance (not full fund composition)[/dim]")
+    else:
+        console.print("[dim]No holdings overlap found between these ETFs.[/dim]")
+
+    # ── Sector Weights per ETF ──
+    all_sectors: set[str] = set()
+    etf_sectors: dict[str, dict[str, float]] = {}
+    for t in tickers:
+        etf_sectors[t] = {}
+        for sw in etf_info[t].get("sector_weightings", []):
+            if isinstance(sw, dict):
+                for sector, weight in sw.items():
+                    all_sectors.add(sector)
+                    etf_sectors[t][sector] = float(weight) * 100
+
+    if all_sectors:
+        s_table = Table(title="Sector Breakdown", show_lines=True, header_style="bold cyan")
+        s_table.add_column("Sector", style="bold", min_width=20)
+        for t in tickers:
+            s_table.add_column(t, justify="right")
+        for sector in sorted(all_sectors):
+            s_table.add_row(
+                sector,
+                *[f"{etf_sectors[t].get(sector, 0):.1f}%" for t in tickers],
+            )
+        console.print(s_table)
+
+
+def render_dip_alert(
+    vix_data: dict,
+    margin_rule: tuple[float, str] | None,
+    sma_data: dict[str, dict],
+    sma_days: int = 200,
+) -> None:
+    """Render the market dip alert: VIX gauge, margin signal, and SMA dip candidates."""
+    from rich.console import Group
+    from rich.rule import Rule
+
+    # ── Panel 1: VIX Fear Gauge ──
+    vix = vix_data.get("current")
+    change = vix_data.get("change_1d", 0.0)
+
+    if vix is not None:
+        if vix < 20:
+            vix_color, vix_label = "green", "LOW VOLATILITY"
+        elif vix < 30:
+            vix_color, vix_label = "yellow", "MODERATE VOLATILITY"
+        else:
+            vix_color, vix_label = "red", "HIGH VOLATILITY"
+
+        change_sign = "+" if change >= 0 else ""
+        change_color = "red" if change > 0 else "green"
+
+        console.print(Panel(
+            Text.assemble(
+                ("  VIX:      ", "bold"), (f"{vix:.2f}", f"bold {vix_color}"),
+                (f"   [{vix_label}]", vix_color), ("\n", ""),
+                ("  1d Change: ", "bold"), (f"{change_sign}{change:.2f}", change_color),
+            ),
+            title="[bold cyan]VIX Fear Gauge[/bold cyan]",
+            border_style=vix_color,
+        ))
+    else:
+        console.print(Panel(
+            "[yellow]Could not fetch VIX data.[/yellow]",
+            title="[bold cyan]VIX Fear Gauge[/bold cyan]",
+            border_style="yellow",
+        ))
+
+    # ── Panel 2: Margin Deployment Signal ──
+    if margin_rule is not None:
+        deploy_pct, label = margin_rule
+        if deploy_pct >= 0.65:
+            signal_color = "red"
+        elif deploy_pct >= 0.45:
+            signal_color = "yellow"
+        else:
+            signal_color = "cyan"
+
+        console.print(Panel(
+            Text.assemble(
+                ("  Signal:  ", "bold"), (label, f"bold {signal_color}"), ("\n", ""),
+                ("  Deploy:  ", "bold"), (f"{deploy_pct:.0%} of available margin", f"bold {signal_color}"),
+            ),
+            title="[bold cyan]Margin Deployment Signal[/bold cyan]",
+            border_style=signal_color,
+        ))
+    else:
+        console.print(Panel(
+            Text.assemble(
+                ("  Signal:  ", "bold"), ("LOW FEAR", "bold green"), ("\n", ""),
+                ("  Deploy:  ", "bold"), ("0% — no margin deployment", "green"),
+            ),
+            title="[bold cyan]Margin Deployment Signal[/bold cyan]",
+            border_style="green",
+        ))
+
+    # ── Panel 3: SMA Dip Candidates ──
+    below = [(t, d) for t, d in sorted(sma_data.items()) if d["pct_from_sma"] < 0]
+
+    if below:
+        table = Table(
+            title=f"Dip Candidates — Below {sma_days}-Day SMA",
+            show_lines=True,
+            header_style="bold cyan",
+        )
+        table.add_column("Ticker", style="bold")
+        table.add_column("Price", justify="right")
+        table.add_column(f"{sma_days}d SMA", justify="right")
+        table.add_column("vs SMA", justify="right")
+
+        for ticker, d in below:
+            pct = d["pct_from_sma"]
+            table.add_row(
+                ticker,
+                f"${d['current_price']:.2f}",
+                f"${d['sma']:.2f}",
+                Text(f"{pct:+.2f}%", style="red"),
+            )
+        console.print(table)
+    else:
+        console.print(f"[dim]No portfolio positions are below their {sma_days}-day SMA.[/dim]")
+
+    # ── Summary ──
+    vix_str = f"{vix:.1f}" if vix is not None else "N/A"
+    deploy_str = f"{margin_rule[0]:.0%}" if margin_rule else "0%"
+    label_str = margin_rule[1] if margin_rule else "LOW FEAR"
+    below_count = len(below)
+    below_tickers = ", ".join(t for t, _ in below) if below else "none"
+
+    console.print(Panel(
+        f"[bold]VIX at {vix_str}[/bold] → [bold]{label_str}[/bold] → "
+        f"Deploy [bold]{deploy_str}[/bold] margin → "
+        f"[bold]{below_count}[/bold] position(s) below {sma_days}d SMA: {below_tickers}",
+        title="[bold magenta]Strategy Summary[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_portfolio_overlap(
+    stock_tickers: list[str],
+    etf_holdings: dict[str, list[dict]],
+    portfolio_weights: dict[str, float],
+) -> None:
+    """Show overlap between individual stock holdings and ETF holdings."""
+    from rich.console import Group
+    from rich.rule import Rule
+
+    if not etf_holdings:
+        console.print("[yellow]No ETF holdings data available.[/yellow]")
+        return
+
+    stock_set = {t.upper() for t in stock_tickers}
+
+    # Build overlap: {stock: {etf: weight_in_etf}}
+    overlap: dict[str, dict[str, float]] = {}
+    for etf_ticker, holdings in etf_holdings.items():
+        for h in holdings:
+            symbol = h.get("symbol", "").upper()
+            pct = h.get("holdingPercent")
+            if symbol in stock_set and pct is not None:
+                overlap.setdefault(symbol, {})[etf_ticker] = pct
+
+    etf_tickers = sorted(etf_holdings.keys())
+
+    # ── Overlap Detail Table ──
+    if overlap:
+        table = Table(
+            title="Portfolio Overlap — Stocks You Hold Individually AND via ETFs",
+            show_lines=True,
+            header_style="bold cyan",
+        )
+        table.add_column("Stock", style="bold")
+        table.add_column("Direct Weight", justify="right")
+        for etf in etf_tickers:
+            table.add_column(f"In {etf}", justify="right")
+        table.add_column("Effective Exposure", justify="right")
+
+        sorted_overlap = sorted(overlap.items(), key=lambda x: -len(x[1]))
+        for stock, etf_map in sorted_overlap:
+            direct_wt = portfolio_weights.get(stock, 0.0)
+            # Effective = direct weight + sum(etf_portfolio_weight * stock_weight_in_etf)
+            indirect = 0.0
+            cells: list = [stock, f"{direct_wt:.1f}%"]
+            for etf in etf_tickers:
+                if etf in etf_map:
+                    wt_in_etf = etf_map[etf] * 100  # holdingPercent is decimal
+                    etf_portfolio_wt = portfolio_weights.get(etf, 0.0)
+                    contribution = etf_portfolio_wt * etf_map[etf]  # % of portfolio via this ETF
+                    indirect += contribution
+                    cells.append(Text(f"{wt_in_etf:.1f}%", style="yellow"))
+                else:
+                    cells.append(Text("—", style="dim"))
+
+            effective = direct_wt + indirect
+            cells.append(Text(f"{effective:.1f}%", style="bold green"))
+            table.add_row(*cells)
+
+        console.print(table)
+
+        # ── Summary Panel ──
+        total_direct = sum(portfolio_weights.get(s, 0.0) for s in overlap)
+        total_effective = 0.0
+        for stock, etf_map in overlap.items():
+            direct = portfolio_weights.get(stock, 0.0)
+            indirect = sum(
+                portfolio_weights.get(etf, 0.0) * pct
+                for etf, pct in etf_map.items()
+            )
+            total_effective += direct + indirect
+
+        redundancy = total_effective - total_direct
+        console.print(Panel(
+            f"[bold]{len(overlap)}[/bold] of your [bold]{len(stock_set)}[/bold] individual stocks "
+            f"also appear in your ETF holdings.\n"
+            f"[bold]Direct exposure:[/bold] {total_direct:.1f}%   "
+            f"[bold]Effective (with ETF):[/bold] {total_effective:.1f}%   "
+            f"[bold yellow]Redundant overlap:[/bold yellow] +{redundancy:.1f}%\n"
+            f"[dim]↳ Effective exposure includes your direct weight plus the indirect weight "
+            f"through ETFs (ETF portfolio weight × stock's weight in that ETF).[/dim]",
+            title="[bold yellow]Overlap Summary[/bold yellow]",
+            border_style="yellow",
+        ))
+    else:
+        console.print(Panel(
+            "[green]No overlap found between your individual stocks and ETF holdings.[/green]\n"
+            "[dim]Note: Based on top holdings reported by yfinance (not full fund composition).[/dim]",
+            border_style="green",
+        ))
+
+    # ── ETFs with no holdings data ──
+    no_data = [etf for etf in etf_tickers if not etf_holdings.get(etf)]
+    if no_data:
+        console.print(
+            f"[dim]No holdings data available for: {', '.join(no_data)} "
+            f"(yfinance may not report holdings for all ETFs)[/dim]"
+        )
+
+
+def _fmt_pct(value: float | None) -> str:
+    """Format a decimal as percentage (0.0039 → '0.39%')."""
+    if value is None:
+        return "N/A"
+    return f"{value * 100:.2f}%"
 
 
 def _fmt_large(value: float | None) -> str:

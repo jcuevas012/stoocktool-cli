@@ -6,3 +6,7 @@ dist/
 build/
 .venv/
 venv/
+.env
+.env.*
+credentials.json
+*.png

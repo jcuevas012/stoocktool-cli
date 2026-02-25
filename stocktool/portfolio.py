@@ -14,6 +14,7 @@ class Position:
     shares: float
     cost_basis: float          # cost per share
     target_weight: Optional[float] = None  # percentage 0-100
+    is_etf: bool = False
 
 
 @dataclass
@@ -22,17 +23,37 @@ class Portfolio:
 
     # --- mutation ---
 
-    def add_position(self, ticker: str, shares: float, price: float) -> None:
+    def add_position(self, ticker: str, shares: float, price: float, is_etf: bool = False) -> None:
         ticker = ticker.upper()
         existing = self._find(ticker)
         if existing is None:
-            self.positions.append(Position(ticker=ticker, shares=shares, cost_basis=price))
+            self.positions.append(Position(ticker=ticker, shares=shares, cost_basis=price, is_etf=is_etf))
         else:
             total_shares = existing.shares + shares
             existing.cost_basis = (
                 existing.shares * existing.cost_basis + shares * price
             ) / total_shares
             existing.shares = total_shares
+            if is_etf:
+                existing.is_etf = True
+
+    def sell_shares(self, ticker: str, shares: float) -> tuple[bool, str]:
+        """Reduce shares for a position. Removes position entirely if all shares sold.
+
+        Returns (success, message).
+        Cost basis stays unchanged — it reflects the original purchase average.
+        """
+        ticker = ticker.upper()
+        pos = self._find(ticker)
+        if pos is None:
+            return False, f"{ticker} not found in portfolio."
+        if shares > pos.shares:
+            return False, f"Cannot sell {shares:.4f} shares — only {pos.shares:.4f} held."
+        if shares == pos.shares:
+            self.positions = [p for p in self.positions if p.ticker != ticker]
+            return True, f"Sold all {shares:.4f} shares of {ticker}. Position closed."
+        pos.shares -= shares
+        return True, f"Sold {shares:.4f} shares of {ticker}. Remaining: {pos.shares:.4f} shares."
 
     def remove_position(self, ticker: str) -> bool:
         ticker = ticker.upper()
@@ -71,6 +92,7 @@ class PositionSnapshot:
     current_weight: float        # percentage of total portfolio
     target_weight: Optional[float]
     sector: Optional[str]
+    is_etf: bool = False
 
 
 @dataclass
@@ -82,6 +104,7 @@ class PortfolioSnapshot:
     total_unrealized_pnl_pct: float
     sector_allocation: dict[str, float]   # sector -> % of portfolio
     rebalancing_signals: list[dict]       # list of signal dicts
+    type_allocation: dict[str, float] = field(default_factory=dict)  # {"ETF": %, "Stock": %}
 
 
 def build_portfolio_snapshot(
@@ -123,6 +146,7 @@ def build_portfolio_snapshot(
                 current_weight=current_weight,
                 target_weight=pos.target_weight,
                 sector=sector_map.get(pos.ticker),
+                is_etf=pos.is_etf,
             )
         )
 
@@ -137,6 +161,13 @@ def build_portfolio_snapshot(
         sector = ps.sector or "Unknown"
         sector_allocation[sector] = sector_allocation.get(sector, 0.0) + ps.current_weight
 
+    # Type allocation (ETF vs Stock)
+    type_allocation: dict[str, float] = {}
+    for ps in position_snapshots:
+        key = "ETF" if ps.is_etf else "Stock"
+        type_allocation[key] = type_allocation.get(key, 0.0) + ps.current_weight
+    type_allocation = {k: v for k, v in type_allocation.items() if v > 0}
+
     # Rebalancing signals
     rebalancing_signals = _compute_rebalancing_signals(position_snapshots, total_market_value)
 
@@ -148,6 +179,7 @@ def build_portfolio_snapshot(
         total_unrealized_pnl_pct=total_unrealized_pnl_pct,
         sector_allocation=sector_allocation,
         rebalancing_signals=rebalancing_signals,
+        type_allocation=type_allocation,
     )
 
 
@@ -192,7 +224,20 @@ def _compute_rebalancing_signals(
 
 # --- persistence ---
 
+def _use_sheets() -> bool:
+    """Check if Google Sheets is configured and credentials exist."""
+    from .config import sheets_configured
+    return sheets_configured()
+
+
 def load_portfolio() -> Portfolio:
+    if _use_sheets():
+        try:
+            from .sheets import load_portfolio_from_sheet
+            return load_portfolio_from_sheet()
+        except Exception:
+            pass  # fall back to JSON
+
     if not PORTFOLIO_FILE.exists():
         return Portfolio()
     try:
@@ -204,6 +249,7 @@ def load_portfolio() -> Portfolio:
                 shares=p["shares"],
                 cost_basis=p["cost_basis"],
                 target_weight=p.get("target_weight"),
+                is_etf=p.get("is_etf", False),
             )
             for p in data.get("positions", [])
         ]
@@ -213,7 +259,37 @@ def load_portfolio() -> Portfolio:
 
 
 def save_portfolio(portfolio: Portfolio) -> None:
+    if _use_sheets():
+        try:
+            from .sheets import save_portfolio_to_sheet
+            save_portfolio_to_sheet(portfolio)
+            return
+        except Exception:
+            pass  # fall back to JSON
+
     ensure_config_dir()
     data = dataclasses.asdict(portfolio)
     with PORTFOLIO_FILE.open("w") as f:
         json.dump(data, f, indent=2)
+
+
+def load_portfolio_json() -> Portfolio:
+    """Load portfolio from local JSON only (used by migrate command)."""
+    if not PORTFOLIO_FILE.exists():
+        return Portfolio()
+    try:
+        with PORTFOLIO_FILE.open() as f:
+            data = json.load(f)
+        positions = [
+            Position(
+                ticker=p["ticker"],
+                shares=p["shares"],
+                cost_basis=p["cost_basis"],
+                target_weight=p.get("target_weight"),
+                is_etf=p.get("is_etf", False),
+            )
+            for p in data.get("positions", [])
+        ]
+        return Portfolio(positions=positions)
+    except (json.JSONDecodeError, KeyError):
+        return Portfolio()

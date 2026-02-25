@@ -16,6 +16,12 @@ app = typer.Typer(
 portfolio_app = typer.Typer(help="Portfolio management commands.", no_args_is_help=True)
 app.add_typer(portfolio_app, name="portfolio")
 
+etf_app = typer.Typer(help="ETF analysis commands.", no_args_is_help=True)
+app.add_typer(etf_app, name="etf")
+
+strategy_app = typer.Typer(help="Investment strategy commands.", no_args_is_help=True)
+app.add_typer(strategy_app, name="strategy")
+
 console = Console()
 
 
@@ -131,6 +137,7 @@ def compare(
 @portfolio_app.command("show")
 def portfolio_show(
     horizon: int = typer.Option(DEFAULT_HORIZON_DAYS, "--horizon", "-h", help="Lookback window in days."),
+    no_chart: bool = typer.Option(False, "--no-chart", help="Skip the allocation pie chart."),
 ) -> None:
     """Display portfolio P&L summary and allocation."""
     from . import data, display
@@ -152,6 +159,9 @@ def portfolio_show(
     display.render_portfolio_summary(snapshot)
     display.render_allocation(snapshot)
 
+    if not no_chart:
+        display.render_pie_chart(snapshot)
+
 
 # ---------------------------------------------------------------------------
 # stocktool portfolio add
@@ -162,6 +172,7 @@ def portfolio_add(
     ticker: str = typer.Argument(..., help="Ticker symbol."),
     shares: float = typer.Argument(..., help="Number of shares."),
     cost_per_share: float = typer.Argument(..., help="Cost per share (purchase price)."),
+    etf: bool = typer.Option(False, "--etf", help="Mark this position as an ETF."),
 ) -> None:
     """Add shares to the portfolio (weighted-average cost basis if ticker exists)."""
     from .portfolio import load_portfolio, save_portfolio
@@ -171,9 +182,35 @@ def portfolio_add(
         raise typer.Exit(1)
 
     portfolio = load_portfolio()
-    portfolio.add_position(ticker.upper(), shares, cost_per_share)
+    portfolio.add_position(ticker.upper(), shares, cost_per_share, is_etf=etf)
     save_portfolio(portfolio)
-    console.print(f"[green]Added {shares} shares of {ticker.upper()} at ${cost_per_share:.2f}.[/green]")
+    label = " (ETF)" if etf else ""
+    console.print(f"[green]Added {shares} shares of {ticker.upper()}{label} at ${cost_per_share:.2f}.[/green]")
+
+
+# ---------------------------------------------------------------------------
+# stocktool portfolio sell
+# ---------------------------------------------------------------------------
+
+@portfolio_app.command("sell")
+def portfolio_sell(
+    ticker: str = typer.Argument(..., help="Ticker symbol."),
+    shares: float = typer.Argument(..., help="Number of shares to sell."),
+) -> None:
+    """Sell (reduce) shares from an existing position. Cost basis stays unchanged."""
+    from .portfolio import load_portfolio, save_portfolio
+
+    if shares <= 0:
+        console.print("[red]Shares must be positive.[/red]")
+        raise typer.Exit(1)
+
+    portfolio = load_portfolio()
+    ok, msg = portfolio.sell_shares(ticker.upper(), shares)
+    if ok:
+        save_portfolio(portfolio)
+        console.print(f"[green]{msg}[/green]")
+    else:
+        console.print(f"[yellow]{msg}[/yellow]")
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +284,80 @@ def portfolio_rebalance() -> None:
 
 
 # ---------------------------------------------------------------------------
+# stocktool portfolio sma
+# ---------------------------------------------------------------------------
+
+@portfolio_app.command("sma")
+def portfolio_sma(
+    days: int = typer.Option(200, "--days", "-d", help="SMA window in trading days."),
+) -> None:
+    """Screen portfolio positions against the 200-day SMA.
+
+    Lists all positions and highlights those trading BELOW their moving average
+    — potential buy opportunities for long-term value investors.
+    """
+    from . import data, display
+    from .portfolio import load_portfolio
+
+    portfolio = load_portfolio()
+    if not portfolio.positions:
+        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        raise typer.Exit()
+
+    tickers = portfolio.tickers()
+    with console.status(f"Fetching {days}-day SMA for {', '.join(tickers)}..."):
+        sma_data = data.fetch_sma_data(tickers, sma_days=days)
+
+    display.render_sma_screen(sma_data, sma_days=days)
+
+
+# ---------------------------------------------------------------------------
+# stocktool portfolio overlap
+# ---------------------------------------------------------------------------
+
+@portfolio_app.command("overlap")
+def portfolio_overlap() -> None:
+    """Show overlap between individual stocks and ETF holdings in the portfolio.
+
+    Identifies stocks you hold directly AND indirectly through ETFs,
+    calculates effective exposure, and highlights redundant overlap.
+    """
+    from . import data, display
+    from .portfolio import load_portfolio, build_portfolio_snapshot
+
+    portfolio = load_portfolio()
+    if not portfolio.positions:
+        console.print("[yellow]Portfolio is empty.[/yellow]")
+        raise typer.Exit()
+
+    etf_positions = [p for p in portfolio.positions if p.is_etf]
+    stock_positions = [p for p in portfolio.positions if not p.is_etf]
+
+    if not etf_positions:
+        console.print("[yellow]No ETFs in portfolio. Nothing to check overlap against.[/yellow]")
+        raise typer.Exit()
+    if not stock_positions:
+        console.print("[yellow]No individual stocks in portfolio. Nothing to check overlap for.[/yellow]")
+        raise typer.Exit()
+
+    tickers = portfolio.tickers()
+    with console.status("Fetching ETF holdings and current prices..."):
+        prices = data.get_current_prices(tickers)
+        fundamentals = data.fetch_fundamentals(tickers)
+        etf_holdings = data.fetch_portfolio_etf_holdings([p.ticker for p in etf_positions])
+
+    sector_map = {t: fundamentals.get(t, {}).get("sector") for t in tickers}
+    snapshot = build_portfolio_snapshot(portfolio, prices, sector_map)
+    portfolio_weights = {ps.ticker: ps.current_weight for ps in snapshot.positions}
+
+    display.render_portfolio_overlap(
+        stock_tickers=[p.ticker for p in stock_positions],
+        etf_holdings=etf_holdings,
+        portfolio_weights=portfolio_weights,
+    )
+
+
+# ---------------------------------------------------------------------------
 # stocktool portfolio analyze
 # ---------------------------------------------------------------------------
 
@@ -274,6 +385,103 @@ def portfolio_analyze(
         for t in tickers
     ]
     display.render_fundamental_table(snapshots, show_scores=scores, horizon_days=horizon)
+
+
+# ---------------------------------------------------------------------------
+# stocktool portfolio migrate
+# ---------------------------------------------------------------------------
+
+@portfolio_app.command("migrate")
+def portfolio_migrate() -> None:
+    """Migrate portfolio from local JSON to Google Sheets."""
+    from .config import sheets_configured
+    from .portfolio import load_portfolio_json
+    from .sheets import save_portfolio_to_sheet
+
+    if not sheets_configured():
+        console.print(
+            "[red]Google Sheets not configured.[/red]\n"
+            "Place your service account credentials at ~/.config/stocktool/credentials.json\n"
+            "and set GOOGLE_SHEETS_CREDENTIALS_FILE in .env"
+        )
+        raise typer.Exit(1)
+
+    portfolio = load_portfolio_json()
+    if not portfolio.positions:
+        console.print("[yellow]Local JSON portfolio is empty. Nothing to migrate.[/yellow]")
+        raise typer.Exit()
+
+    with console.status("Migrating portfolio to Google Sheets..."):
+        save_portfolio_to_sheet(portfolio)
+
+    console.print(
+        f"[green]Migrated {len(portfolio.positions)} position(s) to Google Sheets.[/green]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# stocktool etf compare
+# ---------------------------------------------------------------------------
+
+@etf_app.command("compare")
+def etf_compare(
+    tickers: list[str] = typer.Argument(..., help="Two or more ETF ticker symbols to compare."),
+) -> None:
+    """Compare ETFs: expense ratios, holdings overlap, sector breakdown, and performance."""
+    from . import data, display
+
+    if len(tickers) < 2:
+        console.print("[red]Provide at least 2 ETF tickers to compare.[/red]")
+        raise typer.Exit(1)
+
+    tickers = [t.upper() for t in tickers]
+    with console.status(f"Fetching ETF data for {', '.join(tickers)}..."):
+        etf_info = data.fetch_etf_info(tickers)
+        performance = data.fetch_etf_performance(tickers)
+
+    holdings_map = {t: etf_info.get(t, {}).get("holdings", []) for t in tickers}
+    overlap = data.compute_holdings_overlap(holdings_map)
+
+    display.render_etf_compare(etf_info, performance, overlap)
+
+
+# ---------------------------------------------------------------------------
+# stocktool strategy dip
+# ---------------------------------------------------------------------------
+
+@strategy_app.command("dip")
+def strategy_dip(
+    sma_days: int = typer.Option(200, "--sma-days", "-d", help="SMA window in trading days."),
+) -> None:
+    """Market dip alert: VIX fear gauge + margin deployment rules + SMA dip candidates.
+
+    Combines the CBOE VIX (fear index) with SMA screening to decide
+    when and how much margin to deploy during market dips.
+    """
+    from . import data, display
+    from .config import MARGIN_RULES
+    from .portfolio import load_portfolio
+
+    portfolio = load_portfolio()
+    if not portfolio.positions:
+        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        raise typer.Exit()
+
+    tickers = portfolio.tickers()
+    with console.status("Fetching VIX and SMA data..."):
+        vix_data = data.fetch_vix()
+        sma_data = data.fetch_sma_data(tickers, sma_days=sma_days)
+
+    # Determine which margin rule applies (highest threshold first)
+    margin_rule: tuple[float, str] | None = None
+    vix = vix_data.get("current")
+    if vix is not None:
+        for threshold, deploy_pct, label in MARGIN_RULES:
+            if vix >= threshold:
+                margin_rule = (deploy_pct, label)
+                break
+
+    display.render_dip_alert(vix_data, margin_rule, sma_data, sma_days)
 
 
 # ---------------------------------------------------------------------------
