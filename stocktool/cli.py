@@ -103,6 +103,28 @@ def valuation(
 
 
 # ---------------------------------------------------------------------------
+# stocktool value
+# ---------------------------------------------------------------------------
+
+@app.command()
+def value(
+    tickers: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+) -> None:
+    """Quick value check: P/E, P/B, P/FCF with color-coded value-investor hints."""
+    from . import data, analysis, display
+
+    tickers = [t.upper() for t in tickers]
+    with console.status(f"Fetching data for {', '.join(tickers)}..."):
+        fundamentals = data.fetch_fundamentals(tickers)
+
+    snapshots = [
+        analysis.build_value_check_snapshot(t, fundamentals.get(t, {}))
+        for t in tickers
+    ]
+    display.render_value_check(snapshots)
+
+
+# ---------------------------------------------------------------------------
 # stocktool compare
 # ---------------------------------------------------------------------------
 

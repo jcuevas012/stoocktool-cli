@@ -22,15 +22,15 @@ stocktool/
 │                   get_current_prices, fetch_revenue_estimates, fetch_balance_sheets,
 │                   fetch_sma_data, fetch_vix, fetch_etf_info, fetch_etf_performance,
 │                   compute_holdings_overlap, fetch_portfolio_etf_holdings
-├── analysis.py   — FundamentalSnapshot + ValuationSnapshot dataclasses,
-│                   build_snapshot(), build_valuation_snapshot(), score_ticker()
+├── analysis.py   — FundamentalSnapshot + ValuationSnapshot + ValueCheckSnapshot dataclasses,
+│                   build_snapshot(), build_valuation_snapshot(), build_value_check_snapshot(), score_ticker()
 ├── portfolio.py  — Position/Portfolio/PortfolioSnapshot dataclasses,
 │                   load/save with auto-routing (Google Sheets → JSON fallback)
 ├── sheets.py     — Google Sheets CRUD: load_portfolio_from_sheet,
 │                   save_portfolio_to_sheet, sync_position, remove_position_from_sheet
 ├── display.py    — Rich table/panel renderers + render_pie_chart() +
 │                   render_etf_compare() + render_dip_alert() +
-│                   render_portfolio_overlap() (zero business logic)
+│                   render_portfolio_overlap() + render_value_check() (zero business logic)
 └── cli.py        — Typer app + subcommands; calls data → analysis/portfolio → display
 ```
 
@@ -81,6 +81,7 @@ stocktool portfolio migrate
 stocktool analyze AAPL MSFT [--horizon 90] [--scores]
 stocktool compare AAPL MSFT GOOGL [--horizon 60]
 stocktool valuation AAPL MSFT GOOGL
+stocktool value AAPL MSFT GOOGL
 stocktool portfolio show [--horizon 90] [--no-chart]
 stocktool portfolio add TICKER SHARES COST_PER_SHARE [--etf]
 stocktool portfolio sell TICKER SHARES
@@ -157,6 +158,19 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 - 15–50% → Moderate upside — monitor fundamentals
 - 0–15% → Limited upside at current price
 - < 0% → Projected downside — re-evaluate
+
+## Quick Value Check (`stocktool value`)
+Quick-reference command for value investors. Shows P/E, P/B, and P/FCF ratios with color-coded thresholds and hint text.
+
+**Thresholds:**
+
+| Metric | Green (Good) | Yellow (Fair) | Red (Expensive) |
+|--------|-------------|---------------|-----------------|
+| P/E | < 15 | 15–25 | > 25 or negative |
+| P/B | < 1.5 | 1.5–3 | > 3 or negative |
+| P/FCF | < 15 | 15–25 | > 25 or negative |
+
+P/FCF is computed as `marketCap / freeCashflow` from `.info` fields.
 
 ## SMA Screen (`stocktool portfolio sma`)
 Screens all portfolio positions against their Simple Moving Average (default 200-day).

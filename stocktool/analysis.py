@@ -200,6 +200,34 @@ def build_valuation_snapshot(
     )
 
 
+@dataclass
+class ValueCheckSnapshot:
+    ticker: str
+    sector: Optional[str] = None
+    current_price: Optional[float] = None
+    pe_ratio: Optional[float] = None        # trailingPE
+    pb_ratio: Optional[float] = None        # priceToBook
+    pfcf_ratio: Optional[float] = None      # marketCap / freeCashflow
+
+
+def build_value_check_snapshot(ticker: str, info: dict) -> ValueCheckSnapshot:
+    """Build a ValueCheckSnapshot from raw yfinance .info dict."""
+    market_cap = _safe_float(info.get("marketCap"))
+    free_cashflow = _safe_float(info.get("freeCashflow"))
+    pfcf: Optional[float] = None
+    if market_cap and free_cashflow and free_cashflow > 0:
+        pfcf = market_cap / free_cashflow
+
+    return ValueCheckSnapshot(
+        ticker=ticker,
+        sector=info.get("sector"),
+        current_price=_safe_float(info.get("currentPrice")),
+        pe_ratio=_safe_float(info.get("trailingPE")),
+        pb_ratio=_safe_float(info.get("priceToBook")),
+        pfcf_ratio=pfcf,
+    )
+
+
 def score_ticker(snapshot: FundamentalSnapshot) -> dict[str, str]:
     """Return a color signal for each metric using simple threshold rules.
 

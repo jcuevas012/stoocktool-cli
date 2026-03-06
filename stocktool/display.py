@@ -7,7 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .analysis import FundamentalSnapshot, ValuationSnapshot, score_ticker, pe_category, cash_debt_rating
+from .analysis import FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot, score_ticker, pe_category, cash_debt_rating
 from .portfolio import PortfolioSnapshot
 
 console = Console()
@@ -94,6 +94,59 @@ def render_fundamental_table(
                         cells.append(Text(f"${val:.2f}", style=color))
                     else:
                         cells.append(Text(f"{val:{fmt}}{prefix}", style=color))
+        table.add_row(*cells)
+
+    console.print(table)
+
+
+def render_value_check(snapshots: list[ValueCheckSnapshot]) -> None:
+    """Render a quick value-check table with P/E, P/B, P/FCF and color-coded hints."""
+    # Thresholds: (green_max, yellow_max)
+    THRESHOLDS = {
+        "P/E":   (15, 25, "< 15 = bargain, 15–25 = fair, > 25 = pricey"),
+        "P/B":   (1.5, 3, "< 1.5 = deep value, 1.5–3 = fair, > 3 = expensive"),
+        "P/FCF": (15, 25, "< 15 = strong value, 15–25 = fair, > 25 = expensive"),
+    }
+
+    def _color(value: float | None, green_max: float, yellow_max: float) -> str:
+        if value is None or value < 0:
+            return "red"
+        if value < green_max:
+            return "green"
+        if value <= yellow_max:
+            return "yellow"
+        return "red"
+
+    def _fmt(value: float | None) -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:.1f}x"
+
+    table = Table(title="Quick Value Check", show_lines=True, header_style="bold cyan")
+    table.add_column("Metric", style="bold", min_width=24)
+    for snap in snapshots:
+        label = snap.ticker
+        if snap.sector:
+            label += f"\n[dim]{snap.sector}[/dim]"
+        if snap.current_price is not None:
+            label += f"\n[dim]${snap.current_price:.2f}[/dim]"
+        table.add_column(label, justify="right", min_width=12)
+    table.add_column("Hint", style="dim italic", min_width=30)
+
+    rows = [
+        ("Price to Earnings (P/E)", "pe_ratio", "P/E"),
+        ("Price to Book (P/B)", "pb_ratio", "P/B"),
+        ("Price to Free Cash Flow (P/FCF)", "pfcf_ratio", "P/FCF"),
+    ]
+
+    for label, attr, key in rows:
+        green_max, yellow_max, hint = THRESHOLDS[key]
+        cells: list = [label]
+        for snap in snapshots:
+            val = getattr(snap, attr)
+            color = _color(val, green_max, yellow_max)
+            cells.append(Text(_fmt(val), style=color))
+        cells.append(hint)
         table.add_row(*cells)
 
     console.print(table)
