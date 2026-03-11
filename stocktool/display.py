@@ -7,7 +7,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .analysis import FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot, score_ticker, pe_category, cash_debt_rating
+from .analysis import (
+    FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
+    CashSecuredPutSnapshot, OwnerEarningsSnapshot,
+    score_ticker, pe_category, cash_debt_rating,
+)
 from .portfolio import PortfolioSnapshot
 
 console = Console()
@@ -1085,6 +1089,481 @@ def render_portfolio_overlap(
             f"[dim]No holdings data available for: {', '.join(no_data)} "
             f"(yfinance may not report holdings for all ETFs)[/dim]"
         )
+
+
+def render_owner_earnings(snapshots: list[OwnerEarningsSnapshot]) -> None:
+    """Render Owner Earnings analysis — one panel per ticker with plain English hints."""
+    if not snapshots:
+        console.print("[yellow]No owner earnings data available for the given tickers.[/yellow]")
+        return
+
+    for snap in snapshots:
+        _render_one_owner_earnings(snap)
+
+    # ── Comparison table if multiple tickers ──
+    if len(snapshots) > 1:
+        _render_owner_earnings_comparison(snapshots)
+
+
+def _render_one_owner_earnings(snap: OwnerEarningsSnapshot) -> None:
+    from rich.console import Group
+    from rich.rule import Rule
+
+    lines: list = []
+
+    def hint(text: str) -> None:
+        lines.append(Text(f"  {text}", style="dim italic"))
+
+    # ── Header ──
+    price_str = f"${snap.current_price:.2f}" if snap.current_price else "N/A"
+    mktcap_str = _fmt_large(snap.market_cap)
+    sector_str = snap.sector or "Unknown"
+    lines.append(Text.assemble(
+        ("  Price: ", "bold"), (price_str, "cyan"),
+        ("   Market Cap: ", "bold"), (mktcap_str, "cyan"),
+        ("   Sector: ", "bold"), (sector_str, ""),
+    ))
+    lines.append(Text(""))
+
+    # ── 1. The Formula Breakdown ──
+    lines.append(Rule(" 1. What does this business really earn? ", style="cyan"))
+    hint("Reported profit can be misleading. Owner Earnings shows the actual")
+    hint("cash the business generates for its owners after keeping the lights on.")
+    lines.append(Text(""))
+
+    ni_str = _fmt_large(snap.net_income)
+    dep_str = _fmt_large(snap.depreciation)
+    capex_str = _fmt_large(abs(snap.capex)) if snap.capex else "N/A"
+    wc_str = _fmt_large(abs(snap.working_capital_change)) if snap.working_capital_change is not None else "N/A"
+    wc_sign = "+" if (snap.working_capital_change or 0) <= 0 else "-"
+    oe_str = _fmt_large(snap.owner_earnings)
+
+    lines.append(Text("  The formula:", style="bold"))
+    lines.append(Text.assemble(
+        ("    Reported profit (net income):     ", ""), (ni_str, "white"),
+    ))
+    lines.append(Text.assemble(
+        ("  + Depreciation (non-cash expense):  ", ""), (f"+{dep_str}", "green"),
+    ))
+    hint("    Money the company 'expensed' on paper but didn't actually spend this year.")
+    lines.append(Text.assemble(
+        ("  - Capital spending (to keep running): ", ""), (f"-{capex_str}", "red"),
+    ))
+    hint("    What the company must spend on equipment, buildings, etc. to stay competitive.")
+    wc_color = "green" if (snap.working_capital_change or 0) <= 0 else "red"
+    lines.append(Text.assemble(
+        ("  ", ""), (f"{wc_sign} Working capital changes:         ", ""),
+        (f"{wc_sign}{wc_str}", wc_color),
+    ))
+    hint("    Cash tied up (or freed) in day-to-day operations like inventory and receivables.")
+    lines.append(Text("    " + "─" * 40))
+
+    oe_color = "green" if snap.owner_earnings and snap.owner_earnings > 0 else "red"
+    lines.append(Text.assemble(
+        ("  = Owner Earnings:                   ", "bold"), (oe_str, f"bold {oe_color}"),
+    ))
+    if snap.oe_per_share is not None:
+        lines.append(Text.assemble(
+            ("    Per share: ", ""), (f"${snap.oe_per_share:.2f}", "cyan"),
+        ))
+    lines.append(Text(""))
+
+    # ── 2. Reality Check: OE vs Reported Profit ──
+    lines.append(Rule(" 2. Are the reported profits real? ", style="cyan"))
+    lines.append(Text(""))
+
+    if snap.oe_vs_net_income_pct is not None:
+        diff = snap.oe_vs_net_income_pct
+        if diff > 10:
+            rc_color = "green"
+            rc_verdict = "YES — This company earns MORE cash than it reports as profit."
+            rc_detail = "The real cash coming in exceeds the accounting numbers. Solid."
+        elif diff >= -10:
+            rc_color = "yellow"
+            rc_verdict = "MOSTLY — Cash earnings roughly match reported profits."
+            rc_detail = "What you see is what you get. Straightforward business."
+        else:
+            rc_color = "red"
+            rc_verdict = "CAUTION — Reported profits overstate the real cash earned."
+            rc_detail = (
+                f"The company reports {ni_str} in profit but only generates {oe_str} in cash. "
+                "The gap means heavy spending or accounting adjustments eat into real returns."
+            )
+
+        lines.append(Text.assemble(("  ", ""), (rc_verdict, f"bold {rc_color}")))
+        hint(rc_detail)
+        lines.append(Text(""))
+        lines.append(Text.assemble(
+            ("  Owner Earnings vs Net Income: ", "bold"),
+            (f"{diff:+.1f}%", rc_color),
+            ("  (positive = OE exceeds reported profit)", "dim"),
+        ))
+    else:
+        lines.append(Text("  Cannot compare — net income is zero or negative.", style="dim"))
+    lines.append(Text(""))
+
+    # ── 3. Owner Earnings Yield ──
+    lines.append(Rule(" 3. What return are you getting for your money? ", style="cyan"))
+    hint("Owner Earnings Yield = Owner Earnings / Market Cap.")
+    hint("Think of it as: for every $100 you invest, how much real cash does the business produce?")
+    lines.append(Text(""))
+
+    if snap.oe_yield_pct is not None:
+        yld = snap.oe_yield_pct
+        if yld >= 8:
+            y_color = "green"
+            y_verdict = f"EXCELLENT — You get ${yld:.2f} of real cash for every $100 invested."
+            y_detail = "This is a high-yield business at today's price. Great value territory."
+        elif yld >= 4:
+            y_color = "yellow"
+            y_verdict = f"DECENT — You get ${yld:.2f} of real cash for every $100 invested."
+            y_detail = "A fair return. Could be better, but the business may be growing."
+        else:
+            y_color = "red"
+            y_verdict = f"LOW — You get only ${yld:.2f} of real cash for every $100 invested."
+            y_detail = "You're paying a premium. Only worth it if the business is growing fast."
+
+        lines.append(Text.assemble(("  ", ""), (y_verdict, f"bold {y_color}")))
+        hint(y_detail)
+        lines.append(Text(""))
+        lines.append(Text.assemble(
+            ("  Owner Earnings Yield: ", "bold"), (f"{yld:.2f}%", y_color),
+        ))
+    else:
+        lines.append(Text("  Cannot calculate — owner earnings are zero or negative.", style="dim"))
+    lines.append(Text(""))
+
+    # ── 4. Capital Intensity ──
+    lines.append(Rule(" 4. How much does it cost to keep this business running? ", style="cyan"))
+    hint("Some businesses (like software) need very little reinvestment.")
+    hint("Others (like airlines) must spend heavily just to maintain what they have.")
+    lines.append(Text(""))
+
+    if snap.capex_intensity_pct is not None:
+        ci = snap.capex_intensity_pct
+        if ci < 25:
+            ci_color = "green"
+            ci_label = "LIGHT"
+            ci_verdict = "This business keeps most of what it earns. Very little goes to maintenance."
+            ci_detail = "Like a toll bridge — once built, the cash just flows in."
+        elif ci < 50:
+            ci_color = "yellow"
+            ci_label = "MODERATE"
+            ci_verdict = "Reasonable reinvestment needs. The business keeps more than half its cash."
+            ci_detail = "Manageable spending level. Watch that it doesn't creep up over time."
+        else:
+            ci_color = "red"
+            ci_label = "HEAVY"
+            ci_verdict = "This business eats most of its own cash just to stay competitive."
+            ci_detail = "Like a factory that must constantly buy new machines. Less cash for you."
+
+        lines.append(Text.assemble(
+            ("  Capital Intensity: ", "bold"), (f"{ci:.0f}%", ci_color),
+            (f"   [{ci_label}]", ci_color),
+        ))
+        hint(ci_verdict)
+        hint(ci_detail)
+    else:
+        lines.append(Text("  Cannot calculate capital intensity.", style="dim"))
+    lines.append(Text(""))
+
+    # ── 5. Multi-Year Trend ──
+    lines.append(Rule(" 5. Is the cash machine getting stronger or weaker? ", style="cyan"))
+    hint("A great business generates more cash each year. Consistency is key.")
+    lines.append(Text(""))
+
+    if snap.years and len(snap.years) >= 2:
+        # Trend mini-table
+        trend_table = Table(show_header=True, header_style="bold", box=None, pad_edge=False, padding=(0, 2))
+        trend_table.add_column("Year", style="bold")
+        trend_table.add_column("Net Income", justify="right")
+        trend_table.add_column("Owner Earnings", justify="right")
+        trend_table.add_column("OE vs NI", justify="right")
+
+        # Show years in chronological order (oldest first)
+        for y in reversed(snap.years):
+            oe_val = y.owner_earnings
+            ni_val = y.net_income
+            oe_color_y = "green" if oe_val > 0 else "red"
+            diff_y = ((oe_val / ni_val - 1) * 100) if ni_val and ni_val > 0 else None
+            diff_str = f"{diff_y:+.0f}%" if diff_y is not None else "N/A"
+            diff_color_y = "green" if diff_y is not None and diff_y > 0 else ("red" if diff_y is not None and diff_y < -10 else "yellow")
+
+            trend_table.add_row(
+                y.year[:4],
+                _fmt_large(ni_val),
+                Text(_fmt_large(oe_val), style=oe_color_y),
+                Text(diff_str, style=diff_color_y),
+            )
+
+        lines.append(trend_table)
+        lines.append(Text(""))
+
+        # Trend verdict
+        if snap.trend_direction:
+            t_color = {"GROWING": "green", "STABLE": "yellow", "DECLINING": "red"}.get(snap.trend_direction, "white")
+            trend_hints = {
+                "GROWING": "The business is producing more cash each year. This is what you want to see.",
+                "STABLE": "Cash generation is steady but not growing. Reliable, but watch for stagnation.",
+                "DECLINING": "The business is generating less cash over time. Find out why before investing more.",
+            }
+            lines.append(Text.assemble(
+                ("  Trend: ", "bold"), (snap.trend_direction, f"bold {t_color}"),
+            ))
+            hint(trend_hints.get(snap.trend_direction, ""))
+
+        if snap.oe_growth_pct is not None:
+            g_color = "green" if snap.oe_growth_pct > 0 else "red"
+            lines.append(Text.assemble(
+                ("  Last year growth: ", "bold"), (f"{snap.oe_growth_pct:+.1f}%", g_color),
+            ))
+        if snap.oe_cagr_pct is not None:
+            c_color = "green" if snap.oe_cagr_pct > 0 else "red"
+            n = len(snap.years) - 1
+            lines.append(Text.assemble(
+                (f"  {n}-year CAGR: ", "bold"), (f"{snap.oe_cagr_pct:+.1f}%", c_color),
+                ("  (compound annual growth rate)", "dim"),
+            ))
+    else:
+        lines.append(Text("  Not enough historical data for trend analysis.", style="dim"))
+
+    lines.append(Text(""))
+
+    # ── Bottom Line ──
+    lines.append(Rule(" Bottom Line ", style="bold magenta"))
+    lines.append(Text(""))
+
+    verdicts = []
+    if snap.oe_yield_pct is not None:
+        if snap.oe_yield_pct >= 8:
+            verdicts.append(("High cash yield at this price", "green"))
+        elif snap.oe_yield_pct >= 4:
+            verdicts.append(("Fair cash yield", "yellow"))
+        else:
+            verdicts.append(("Low cash yield — paying a premium", "red"))
+
+    if snap.oe_vs_net_income_pct is not None:
+        if snap.oe_vs_net_income_pct > 10:
+            verdicts.append(("Profits are real and backed by cash", "green"))
+        elif snap.oe_vs_net_income_pct >= -10:
+            verdicts.append(("Cash roughly matches reported profits", "yellow"))
+        else:
+            verdicts.append(("Reported profits may be overstated", "red"))
+
+    if snap.trend_direction == "GROWING":
+        verdicts.append(("Cash generation is growing", "green"))
+    elif snap.trend_direction == "DECLINING":
+        verdicts.append(("Cash generation is declining", "red"))
+
+    if snap.capex_intensity_pct is not None:
+        if snap.capex_intensity_pct < 25:
+            verdicts.append(("Light capital needs — cash cow", "green"))
+        elif snap.capex_intensity_pct >= 50:
+            verdicts.append(("Heavy reinvestment needed to compete", "red"))
+
+    for verdict_text, color in verdicts:
+        bullet = "+" if color == "green" else ("-" if color == "red" else "~")
+        lines.append(Text.assemble(("  ", ""), (f" {bullet} ", f"bold {color}"), (verdict_text, color)))
+
+    lines.append(Text(""))
+
+    console.print(Panel(
+        Group(*lines),
+        title=f"[bold cyan]Owner Earnings: {snap.ticker}[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 1),
+    ))
+
+
+def _render_owner_earnings_comparison(snapshots: list[OwnerEarningsSnapshot]) -> None:
+    """Render a side-by-side comparison table for multiple tickers."""
+    table = Table(
+        title="Owner Earnings — Side by Side",
+        show_lines=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Metric", style="bold", min_width=28)
+    for snap in snapshots:
+        table.add_column(snap.ticker, justify="right", min_width=12)
+    table.add_column("What it means", style="dim italic", min_width=30)
+
+    # Row: Owner Earnings
+    cells: list = ["Owner Earnings"]
+    for snap in snapshots:
+        color = "green" if snap.owner_earnings and snap.owner_earnings > 0 else "red"
+        cells.append(Text(_fmt_large(snap.owner_earnings), style=color))
+    cells.append("Real cash the business produces for owners")
+    table.add_row(*cells)
+
+    # Row: OE per Share
+    cells = ["Per Share"]
+    for snap in snapshots:
+        cells.append(f"${snap.oe_per_share:.2f}" if snap.oe_per_share else "N/A")
+    cells.append("Your share of the cash as a stockholder")
+    table.add_row(*cells)
+
+    # Row: OE Yield
+    cells = ["Owner Earnings Yield"]
+    for snap in snapshots:
+        if snap.oe_yield_pct is not None:
+            color = "green" if snap.oe_yield_pct >= 8 else ("yellow" if snap.oe_yield_pct >= 4 else "red")
+            cells.append(Text(f"{snap.oe_yield_pct:.2f}%", style=color))
+        else:
+            cells.append(Text("N/A", style="dim"))
+    cells.append("Cash return per $100 invested (higher = cheaper)")
+    table.add_row(*cells)
+
+    # Row: OE vs Net Income
+    cells = ["OE vs Reported Profit"]
+    for snap in snapshots:
+        if snap.oe_vs_net_income_pct is not None:
+            color = "green" if snap.oe_vs_net_income_pct > 10 else ("red" if snap.oe_vs_net_income_pct < -10 else "yellow")
+            cells.append(Text(f"{snap.oe_vs_net_income_pct:+.0f}%", style=color))
+        else:
+            cells.append(Text("N/A", style="dim"))
+    cells.append("Positive = profits are real, negative = inflated")
+    table.add_row(*cells)
+
+    # Row: Capital Intensity
+    cells = ["Capital Intensity"]
+    for snap in snapshots:
+        if snap.capex_intensity_pct is not None:
+            color = "green" if snap.capex_intensity_pct < 25 else ("red" if snap.capex_intensity_pct >= 50 else "yellow")
+            cells.append(Text(f"{snap.capex_intensity_pct:.0f}%", style=color))
+        else:
+            cells.append(Text("N/A", style="dim"))
+    cells.append("Low = cash cow, high = needs constant spending")
+    table.add_row(*cells)
+
+    # Row: Trend
+    cells = ["Trend"]
+    for snap in snapshots:
+        t = snap.trend_direction or "N/A"
+        color = {"GROWING": "green", "STABLE": "yellow", "DECLINING": "red"}.get(t, "dim")
+        cells.append(Text(t, style=color))
+    cells.append("Is the cash machine improving over time?")
+    table.add_row(*cells)
+
+    console.print(table)
+
+
+def render_cash_secured_puts(snapshots: list[CashSecuredPutSnapshot]) -> None:
+    """Render cash-secured put opportunities ranked by valuation attractiveness."""
+
+    if not snapshots:
+        console.print("[yellow]No put-selling opportunities found for portfolio stocks.[/yellow]")
+        return
+
+    # Sort by valuation attractiveness (best possible return first)
+    ranked = sorted(
+        snapshots,
+        key=lambda s: s.possible_return_pct if s.possible_return_pct is not None else -999,
+        reverse=True,
+    )
+
+    # ── Main Table ──
+    table = Table(
+        title="Cash-Secured Put Screener — Buffett Style",
+        show_lines=True,
+        header_style="bold cyan",
+        caption="Sell puts on stocks you'd happily own for 5–10 years. If assigned, you buy at a discount.",
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Ticker", style="bold")
+    table.add_column("Beta", justify="right")
+    table.add_column("Price", justify="right")
+    table.add_column("Strike", justify="right")
+    table.add_column("Exp (DTE)", justify="right")
+    table.add_column("Premium", justify="right")
+    table.add_column("Cash Req", justify="right")
+    table.add_column("Return", justify="right")
+    table.add_column("Annual.", justify="right")
+    table.add_column("Eff. Buy", justify="right")
+    table.add_column("Discount", justify="right")
+    table.add_column("OI", justify="right")
+    table.add_column("Valuation", justify="center")
+
+    for i, snap in enumerate(ranked, 1):
+        # Beta color: < 1 = green (less volatile), > 1.5 = red
+        beta_str = f"{snap.beta:.2f}" if snap.beta is not None else "N/A"
+        beta_color = "white"
+        if snap.beta is not None:
+            beta_color = "green" if snap.beta < 1 else ("yellow" if snap.beta < 1.5 else "red")
+
+        # Return color: > 2% = green, 1-2% = yellow, < 1% = dim
+        ret_color = "dim"
+        if snap.return_pct is not None:
+            ret_color = "green" if snap.return_pct >= 2 else ("yellow" if snap.return_pct >= 1 else "dim")
+
+        # Annualized return color
+        ann_color = "dim"
+        if snap.annualized_return_pct is not None:
+            ann_color = "green" if snap.annualized_return_pct >= 12 else (
+                "yellow" if snap.annualized_return_pct >= 6 else "dim"
+            )
+
+        # Valuation verdict color
+        verdict = snap.valuation_verdict or "N/A"
+        verdict_color = "dim"
+        if verdict == "STRONG BUY":
+            verdict_color = "bold green"
+        elif verdict == "GOOD VALUE":
+            verdict_color = "green"
+        elif verdict == "FAIR":
+            verdict_color = "yellow"
+        elif verdict == "OVERVALUED":
+            verdict_color = "red"
+
+        table.add_row(
+            str(i),
+            snap.ticker,
+            Text(beta_str, style=beta_color),
+            f"${snap.current_price:.2f}" if snap.current_price else "N/A",
+            f"${snap.strike:.2f}" if snap.strike else "N/A",
+            f"{snap.expiration} ({snap.dte}d)" if snap.expiration and snap.dte else "N/A",
+            f"${snap.premium:.2f}" if snap.premium else "N/A",
+            f"${snap.cash_required:,.0f}" if snap.cash_required else "N/A",
+            Text(f"{snap.return_pct:.2f}%", style=ret_color) if snap.return_pct is not None else Text("N/A", style="dim"),
+            Text(f"{snap.annualized_return_pct:.1f}%", style=ann_color) if snap.annualized_return_pct is not None else Text("N/A", style="dim"),
+            f"${snap.effective_buy_price:.2f}" if snap.effective_buy_price else "N/A",
+            Text(f"{snap.discount_pct:.1f}%", style="green") if snap.discount_pct is not None else Text("N/A", style="dim"),
+            f"{snap.open_interest:,}" if snap.open_interest else "N/A",
+            Text(verdict, style=verdict_color),
+        )
+
+    console.print(table)
+
+    # ── Strategy Summary Panel ──
+    strong = [s for s in ranked if s.valuation_verdict in ("STRONG BUY", "GOOD VALUE")]
+    best_returns = sorted(
+        [s for s in ranked if s.annualized_return_pct is not None],
+        key=lambda s: s.annualized_return_pct,  # type: ignore[arg-type]
+        reverse=True,
+    )
+
+    lines = []
+    if strong:
+        tickers_str = ", ".join(s.ticker for s in strong)
+        lines.append(f"[bold green]Top value picks for puts:[/bold green] {tickers_str}")
+    if best_returns:
+        top = best_returns[0]
+        lines.append(
+            f"[bold]Best annualized return:[/bold] {top.ticker} at "
+            f"{top.annualized_return_pct:.1f}% "
+            f"(${top.premium:.2f} premium on ${top.strike:.2f} strike)"
+        )
+    total_cash = sum(s.cash_required for s in ranked if s.cash_required)
+    lines.append(f"[bold]Total cash needed (all puts):[/bold] ${total_cash:,.0f}")
+    lines.append(
+        "[dim]Targets: ~5% OTM strikes, 30-45 DTE. "
+        "If assigned, you own a great company at a discount.[/dim]"
+    )
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Put-Selling Strategy Summary[/bold magenta]",
+        border_style="magenta",
+    ))
 
 
 def _fmt_pct(value: float | None) -> str:

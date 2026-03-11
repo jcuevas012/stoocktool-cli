@@ -507,6 +507,115 @@ def strategy_dip(
 
 
 # ---------------------------------------------------------------------------
+# stocktool owner-earnings
+# ---------------------------------------------------------------------------
+
+@app.command("owner-earnings")
+def owner_earnings(
+    tickers: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+) -> None:
+    """Owner Earnings: what the business really earns in cash.
+
+    Warren Buffett's preferred measure of true profitability.
+    Unlike reported profit, Owner Earnings shows the actual cash
+    a business generates for its owners after maintaining operations.
+
+    Formula: Net Income + Depreciation - Capital Spending - Working Capital Changes
+
+    Shows plain-English verdicts, multi-year trends, and a side-by-side
+    comparison when analyzing multiple tickers.
+    """
+    from . import data, analysis, display
+
+    tickers = [t.upper() for t in tickers]
+    with console.status(f"Fetching cash flow data for {', '.join(tickers)}..."):
+        oe_data = data.fetch_owner_earnings(tickers)
+
+    snapshots: list[analysis.OwnerEarningsSnapshot] = []
+    no_data: list[str] = []
+    for t in tickers:
+        snap = analysis.build_owner_earnings_snapshot(t, oe_data.get(t, {}))
+        if snap:
+            snapshots.append(snap)
+        else:
+            no_data.append(t)
+
+    display.render_owner_earnings(snapshots)
+
+    if no_data:
+        console.print(f"[dim]No cash flow data available for: {', '.join(no_data)}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# stocktool strategy puts
+# ---------------------------------------------------------------------------
+
+@strategy_app.command("puts")
+def strategy_puts(
+    min_dte: int = typer.Option(30, "--min-dte", help="Minimum days to expiration."),
+    max_dte: int = typer.Option(45, "--max-dte", help="Maximum days to expiration."),
+    otm_pct: float = typer.Option(5.0, "--otm", help="Target OTM percentage below current price."),
+) -> None:
+    """Cash-secured put screener for portfolio stocks.
+
+    Finds put-selling opportunities on stocks you'd happily own for 5-10 years.
+    Ranks by valuation attractiveness (projected return from the valuation engine)
+    so you sell puts on the best value stocks first.
+
+    Shows: beta, strike, premium, cash required, return, annualized return,
+    effective buy price (if assigned), and valuation verdict.
+    """
+    from . import data, analysis, display
+    from .portfolio import load_portfolio
+
+    portfolio = load_portfolio()
+    if not portfolio.positions:
+        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        raise typer.Exit()
+
+    # Only screen individual stocks (not ETFs)
+    stock_tickers = [p.ticker for p in portfolio.positions if not p.is_etf]
+    if not stock_tickers:
+        console.print("[yellow]No individual stocks in portfolio. Puts are for stocks you'd hold 5-10 years.[/yellow]")
+        raise typer.Exit()
+
+    with console.status(f"Fetching options & valuation data for {', '.join(stock_tickers)}..."):
+        # Fetch put options
+        put_data = data.fetch_put_candidates(stock_tickers, min_dte=min_dte, max_dte=max_dte)
+
+        # Fetch valuation data for ranking
+        fundamentals = data.fetch_fundamentals(stock_tickers)
+        history_6m = data.fetch_price_history(stock_tickers, horizon_days=180)
+        revenue_estimates = data.fetch_revenue_estimates(stock_tickers)
+        balance_sheets = data.fetch_balance_sheets(stock_tickers)
+
+    # Build valuation snapshots for ranking
+    valuations = {
+        t: analysis.build_valuation_snapshot(
+            t, fundamentals.get(t, {}), history_6m,
+            revenue_estimates.get(t), balance_sheets.get(t, {}),
+        )
+        for t in stock_tickers
+    }
+
+    # Build put snapshots
+    snapshots: list[analysis.CashSecuredPutSnapshot] = []
+    no_options: list[str] = []
+    for t in stock_tickers:
+        pd_entry = put_data.get(t, {})
+        snap = analysis.build_csp_snapshot(t, pd_entry, valuations.get(t), target_otm_pct=otm_pct)
+        if snap:
+            snapshots.append(snap)
+        else:
+            no_options.append(t)
+
+    display.render_cash_secured_puts(snapshots)
+
+    if no_options:
+        console.print(f"[dim]No options data available for: {', '.join(no_options)}[/dim]")
+
+
+# ---------------------------------------------------------------------------
 # Entry point for `python -m stocktool.cli`
 # ---------------------------------------------------------------------------
 

@@ -3,10 +3,12 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
+
 CLI tool for mid-term stock fundamental analysis and portfolio tracking.
 Uses **yfinance** (no API key required), **typer** for CLI, and **rich** for terminal output.
 
 ## Installation
+
 ```bash
 pip install -e .          # installs `stocktool` entry point
 # OR
@@ -14,6 +16,7 @@ python -m stocktool.cli   # run directly without installing
 ```
 
 ## Architecture
+
 ```
 stocktool/
 ├── config.py     — Path constants, DEFAULT_HORIZON_DAYS=90, VIX_TICKER, MARGIN_RULES,
@@ -21,22 +24,27 @@ stocktool/
 ├── data.py       — All yfinance I/O: fetch_fundamentals, fetch_price_history,
 │                   get_current_prices, fetch_revenue_estimates, fetch_balance_sheets,
 │                   fetch_sma_data, fetch_vix, fetch_etf_info, fetch_etf_performance,
-│                   compute_holdings_overlap, fetch_portfolio_etf_holdings
-├── analysis.py   — FundamentalSnapshot + ValuationSnapshot + ValueCheckSnapshot dataclasses,
-│                   build_snapshot(), build_valuation_snapshot(), build_value_check_snapshot(), score_ticker()
+│                   compute_holdings_overlap, fetch_portfolio_etf_holdings,
+│                   fetch_owner_earnings, fetch_put_candidates
+├── analysis.py   — FundamentalSnapshot + ValuationSnapshot + ValueCheckSnapshot +
+│                   CashSecuredPutSnapshot + OwnerEarningsSnapshot dataclasses,
+│                   build_snapshot(), build_valuation_snapshot(), build_value_check_snapshot(),
+│                   build_owner_earnings_snapshot(), build_csp_snapshot(), score_ticker()
 ├── portfolio.py  — Position/Portfolio/PortfolioSnapshot dataclasses,
 │                   load/save with auto-routing (Google Sheets → JSON fallback)
 ├── sheets.py     — Google Sheets CRUD: load_portfolio_from_sheet,
 │                   save_portfolio_to_sheet, sync_position, remove_position_from_sheet
 ├── display.py    — Rich table/panel renderers + render_pie_chart() +
 │                   render_etf_compare() + render_dip_alert() +
-│                   render_portfolio_overlap() + render_value_check() (zero business logic)
+│                   render_portfolio_overlap() + render_value_check() +
+│                   render_cash_secured_puts() + render_owner_earnings() (zero business logic)
 └── cli.py        — Typer app + subcommands; calls data → analysis/portfolio → display
 ```
 
 **Dependency direction**: `config → data/analysis/portfolio/sheets → cli`; `display` only imported by `cli`.
 
 ## Portfolio Persistence
+
 Two backends, auto-selected:
 
 1. **Google Sheets** (primary, if configured) — positions stored in a shared spreadsheet.
@@ -52,6 +60,7 @@ Two backends, auto-selected:
 Never store computed/live data — only: ticker, shares, cost_basis, target_weight, is_etf.
 
 ### Google Sheets Setup
+
 ```bash
 # 1. Create a Google Cloud service account and download the JSON key
 # 2. Place the key file:
@@ -66,6 +75,7 @@ stocktool portfolio migrate
 ```
 
 ## Key yfinance Notes
+
 - Always use `group_by="ticker"` with `yf.download()` to ensure consistent MultiIndex
 - Single-ticker downloads are normalized to MultiIndex manually in `data.py`
 - `.info` keys are unreliable — always use `.get()` with `Optional[float]` fields
@@ -77,11 +87,13 @@ stocktool portfolio migrate
 - ETF top holdings: use `ticker.funds_data.top_holdings` (returns DataFrame with Symbol index, `"Name"` and `"Holding Percent"` columns). The `.info["holdings"]` key is no longer populated by yfinance.
 
 ## Commands
+
 ```bash
 stocktool analyze AAPL MSFT [--horizon 90] [--scores]
 stocktool compare AAPL MSFT GOOGL [--horizon 60]
 stocktool valuation AAPL MSFT GOOGL
 stocktool value AAPL MSFT GOOGL
+stocktool owner-earnings AAPL MSFT GOOGL
 stocktool portfolio show [--horizon 90] [--no-chart]
 stocktool portfolio add TICKER SHARES COST_PER_SHARE [--etf]
 stocktool portfolio sell TICKER SHARES
@@ -94,23 +106,29 @@ stocktool portfolio overlap
 stocktool portfolio migrate
 stocktool etf compare VOO QQQM SPY
 stocktool strategy dip [--sma-days 200]
+stocktool strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
 ```
 
 ## ETF Support
 
 ### `--etf` flag
+
 Use `stocktool portfolio add TICKER SHARES COST --etf` to mark a position as an ETF.
 The `is_etf` flag is stored in the Google Sheet and local JSON.
 
 ### Type grouping in `portfolio show`
+
 When the portfolio has both ETFs and individual stocks:
+
 - **Portfolio Summary** groups positions by type with sub-total rows (Stocks Subtotal, ETFs Subtotal)
 - **Allocation** table includes a Type column
 - **Type Breakdown** table shows ETF vs Stock total weights
 - **Pie chart** includes a third chart: ETF vs Stock split
 
 ### `stocktool etf compare` command
+
 Compares 2+ ETFs side-by-side:
+
 - **Overview:** Name, expense ratio, AUM, dividend yield, fund family
 - **Performance:** Price returns over 1M, 3M, 6M, 1Y, 3Y, 5Y
 - **Top Holdings:** Top 10 holdings per ETF (when available from yfinance)
@@ -120,12 +138,15 @@ Compares 2+ ETFs side-by-side:
 **Note:** yfinance ETF data varies — expense ratio, holdings, and sector weights may show N/A for some ETFs. Holdings overlap is based on top reported holdings only (not full fund composition).
 
 ## Pie Chart (`stocktool portfolio show`)
+
 `portfolio show` now renders allocation charts after the summary tables:
+
 - **Terminal:** Horizontal bar charts (ticker allocation + sector allocation) using rich
 - **PNG:** Matplotlib pie charts saved to `~/.config/stocktool/portfolio_allocation.png`
 - Use `--no-chart` to skip chart rendering
 
 ## Valuation Command (`stocktool valuation`)
+
 Full value-investing analysis template. Designed for 5+ year positions.
 Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimates + balance sheet.
 
@@ -142,6 +163,7 @@ Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimate
 | — | Valuation Projection | Revenue × margin = earnings; earnings × avg PE = future market cap → possible return | computed |
 
 **Projection formula:**
+
 ```
 Projected Earnings = Next-Year Revenue Estimate × Profit Margin
 Future Market Cap  = Projected Earnings × 6-Month Avg PE
@@ -149,17 +171,20 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 ```
 
 **Debt/Assets thresholds:**
+
 - < 40% → LOW LEVERAGE (green)
 - 40–65% → MODERATE (yellow)
 - > 65% → HIGH LEVERAGE (red)
 
 **Possible Return verdict:**
+
 - ≥ 50% → Strong opportunity for long-term investor
 - 15–50% → Moderate upside — monitor fundamentals
 - 0–15% → Limited upside at current price
 - < 0% → Projected downside — re-evaluate
 
 ## Quick Value Check (`stocktool value`)
+
 Quick-reference command for value investors. Shows P/E, P/B, and P/FCF ratios with color-coded thresholds and hint text.
 
 **Thresholds:**
@@ -172,7 +197,48 @@ Quick-reference command for value investors. Shows P/E, P/B, and P/FCF ratios wi
 
 P/FCF is computed as `marketCap / freeCashflow` from `.info` fields.
 
+## Owner Earnings (`stocktool owner-earnings`)
+
+Buffett's preferred measure of true profitability. Unlike reported net income, Owner Earnings
+shows the actual cash a business generates for its owners after maintaining operations.
+
+**Formula:** `Net Income + Depreciation - Capital Spending - Working Capital Changes`
+
+**Data source:** `ticker.cashflow` DataFrame. Index keys:
+- `Net Income From Continuing Operations` (fallback: `Net Income`)
+- `Depreciation Amortization Depletion` (fallback: `Depreciation And Amortization`)
+- `Capital Expenditure` (already negative in yfinance — add directly)
+- `Change In Working Capital` (negative = cash consumed)
+
+**Sections rendered (one panel per ticker):**
+
+| # | Section | What it answers |
+|---|---------|-----------------|
+| 1 | Formula Breakdown | What does this business really earn in cash? |
+| 2 | Reality Check | Are the reported profits real? (OE vs Net Income) |
+| 3 | Owner Earnings Yield | What return are you getting for your money? |
+| 4 | Capital Intensity | How much does it cost to keep this business running? |
+| 5 | Multi-Year Trend | Is the cash machine getting stronger or weaker? |
+| - | Bottom Line | Combined verdict bullets |
+
+**Key metrics and thresholds:**
+
+| Metric | Green | Yellow | Red |
+|--------|-------|--------|-----|
+| OE vs Net Income | > +10% (earns more than reports) | -10% to +10% (matches) | < -10% (overstated) |
+| Owner Earnings Yield | >= 8% (excellent value) | 4-8% (decent) | < 4% (paying premium) |
+| Capital Intensity | < 25% (cash cow) | 25-50% (moderate) | >= 50% (heavy spender) |
+| Trend | GROWING | STABLE | DECLINING |
+
+**Multi-ticker comparison:** When 2+ tickers are provided, a side-by-side summary table
+is rendered after the individual panels with a "What it means" column in plain English.
+
+**Plain English design:** Every metric includes a verdict in simple language (e.g., "Like a toll
+bridge — once built, the cash just flows in" for low capital intensity). No financial jargon
+without an explanation.
+
 ## SMA Screen (`stocktool portfolio sma`)
+
 Screens all portfolio positions against their Simple Moving Average (default 200-day).
 Highlights positions trading **below** the SMA — potential buying opportunities for value investors.
 
@@ -182,6 +248,7 @@ Highlights positions trading **below** the SMA — potential buying opportunitie
 - Summary panel lists flagged tickers and suggests `stocktool valuation` for deeper analysis
 
 ## Portfolio Overlap (`stocktool portfolio overlap`)
+
 Shows overlap between individual stocks and ETF holdings in the portfolio.
 Identifies stocks held both directly and indirectly through ETFs.
 
@@ -190,12 +257,14 @@ Identifies stocks held both directly and indirectly through ETFs.
 - Summary panel shows total direct vs effective exposure and redundant overlap percentage
 
 **Output:**
+
 - **Overlap Table** — Each overlapping stock with direct weight, weight in each ETF, and effective exposure
 - **Overlap Summary** — Count of overlapping stocks, direct vs effective totals, redundant overlap %
 
 **Note:** Based on top holdings reported by yfinance (not full fund composition). ETFs without holdings data are listed separately.
 
 ## Market Dip Alert (`stocktool strategy dip`)
+
 Combines the CBOE VIX (fear index) with SMA screening to help decide when and how much margin to deploy during market dips.
 
 - Fetches `^VIX` via `yf.download()` for current fear level and 1-day change
@@ -208,23 +277,73 @@ Combines the CBOE VIX (fear index) with SMA screening to help decide when and ho
 
 | VIX Level | Margin to Deploy | Label |
 |-----------|-----------------|-------|
-| < 30      | 0%              | LOW FEAR — no margin deployment |
+| < 28      | 0%              | LOW FEAR — no margin deployment |
+| ~28       | 15%             | EARLY WARNING — deploy 15% margin |
 | ~30       | 25%             | ELEVATED — deploy 25% margin |
 | ~35       | 45%             | HIGH FEAR — deploy 45% margin |
 | ≥ 40      | 65%             | EXTREME FEAR — deploy 65% margin |
 
 **Output panels:**
+
 1. **VIX Fear Gauge** — Current VIX value, color-coded, 1-day change
 2. **Margin Deployment Signal** — Which rule triggered, margin % to deploy
 3. **Dip Candidates** — Portfolio positions trading below SMA
 4. **Strategy Summary** — Combined signal in one line
 
+## Cash-Secured Put Screener (`stocktool strategy puts`)
+
+Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks you'd happily own for 5-10 years. If assigned, you buy a great company at a discount while collecting premium.
+
+- Only screens individual stocks (not ETFs) from the portfolio
+- Finds put options expiring in 30-45 DTE (configurable via `--min-dte` / `--max-dte`)
+- Selects strikes ~5% below current price (configurable via `--otm`)
+- Ranks stocks by valuation attractiveness (using the valuation engine's projected return)
+- Uses bid price as premium (what you'd actually receive)
+
+**Data fetched per ticker:**
+
+- Options chain (puts) via `ticker.option_chain(date)` for nearest 30-45 DTE expiration
+- Beta from `.info` (volatility measure)
+- Full valuation data (fundamentals, 6-month history, revenue estimates, balance sheet) for ranking
+
+**Columns displayed:**
+
+| Column | Description |
+|--------|-------------|
+| Beta | Stock volatility vs market (< 1 = less volatile) |
+| Price | Current stock price |
+| Strike | Selected put strike (~5% OTM) |
+| Exp (DTE) | Expiration date and days to expiration |
+| Premium | Bid price per share (what you collect) |
+| Cash Req | Cash needed to secure the put (strike x 100) |
+| Return | Premium / strike as percentage |
+| Annual. | Return annualized to 365 days |
+| Eff. Buy | Effective purchase price if assigned (strike - premium) |
+| Discount | Discount from current price to effective buy price |
+| OI | Open interest (liquidity indicator) |
+| Valuation | Verdict from valuation engine (STRONG BUY / GOOD VALUE / FAIR / OVERVALUED) |
+
+**Valuation verdict thresholds (from projected return):**
+>
+- >= 50% projected return → STRONG BUY
+- 15-50% → GOOD VALUE
+- 0-15% → FAIR
+- < 0% → OVERVALUED
+
+**Color coding:**
+
+- Beta: green < 1, yellow 1-1.5, red > 1.5
+- Return: green >= 2%, yellow 1-2%, dim < 1%
+- Annualized: green >= 12%, yellow 6-12%, dim < 6%
+
 ## Rebalancing Logic
+
 - OVERWEIGHT: current_weight > target_weight + 2%  → red
 - UNDERWEIGHT: current_weight < target_weight - 2%  → yellow
 - ON_TARGET: within ±2%                             → green
 
 ## Scoring Thresholds (analysis.py)
+
 | Metric        | Green         | Yellow       | Red           |
 |---------------|---------------|--------------|---------------|
 | P/E           | < 15          | 15–30        | > 30 or < 0   |
@@ -234,3 +353,6 @@ Combines the CBOE VIX (fear index) with SMA screening to help decide when and ho
 | ROE           | > 20%         | 10–20%       | < 10%         |
 | P/B           | < 3x          | 3–6x         | > 6x or < 0   |
 | Horizon Return| > 5%          | 0–5%         | < 0           |
+
+***Consideration***
+When new feature is added please update the CLAUDE.md documentation with the principles to consider as help for future feature

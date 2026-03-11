@@ -321,6 +321,178 @@ def fetch_vix() -> dict:
         return {}
 
 
+def fetch_owner_earnings(tickers: list[str]) -> dict[str, dict]:
+    """Fetch cash flow statement data needed for Owner Earnings calculation.
+
+    Returns {ticker: {
+        "net_income": float, "depreciation": float, "capex": float (negative),
+        "working_capital_change": float,
+        "market_cap": float, "current_price": float,
+        "years": [{same fields per year}, ...],  # multi-year for trend
+    }}
+    """
+    results: dict[str, dict] = {}
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info if isinstance(t.info, dict) else {}
+            cf = t.cashflow
+
+            if cf is None or cf.empty:
+                return ticker, {}
+
+            # Helper to find a value by trying multiple index keys
+            def _get_cf(frame, *keys):
+                for key in keys:
+                    if key in frame.index:
+                        val = frame.loc[key]
+                        if pd.notna(val.iloc[0]) if not isinstance(val.iloc[0], str) else False:
+                            return val
+                return None
+
+            # Build per-year data (columns are fiscal year dates, newest first)
+            years = []
+            for col in cf.columns:
+                year_label = str(col.year) if hasattr(col, "year") else str(col)
+                ni_row = _get_cf(cf, "Net Income From Continuing Operations", "Net Income")
+                dep_row = _get_cf(cf, "Depreciation Amortization Depletion", "Depreciation And Amortization")
+                capex_row = _get_cf(cf, "Capital Expenditure")
+                wc_row = _get_cf(cf, "Change In Working Capital")
+
+                ni = float(ni_row[col]) if ni_row is not None and pd.notna(ni_row[col]) else None
+                dep = float(dep_row[col]) if dep_row is not None and pd.notna(dep_row[col]) else None
+                capex = float(capex_row[col]) if capex_row is not None and pd.notna(capex_row[col]) else None
+                wc = float(wc_row[col]) if wc_row is not None and pd.notna(wc_row[col]) else None
+
+                if ni is not None and dep is not None and capex is not None:
+                    # capex is already negative in yfinance
+                    # wc change: negative = cash consumed, positive = cash released
+                    wc_val = wc if wc is not None else 0
+                    owner_earnings = ni + dep + capex - wc_val
+                    years.append({
+                        "year": year_label,
+                        "net_income": ni,
+                        "depreciation": dep,
+                        "capex": capex,
+                        "working_capital_change": wc_val,
+                        "owner_earnings": owner_earnings,
+                    })
+
+            if not years:
+                return ticker, {}
+
+            latest = years[0]
+            return ticker, {
+                **latest,
+                "market_cap": _safe_float(info.get("marketCap")),
+                "current_price": _safe_float(info.get("currentPrice")),
+                "shares_outstanding": _safe_float(info.get("sharesOutstanding")),
+                "sector": info.get("sector"),
+                "years": years,
+            }
+        except Exception:
+            return ticker, {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, data = future.result()
+            results[ticker] = data
+
+    return results
+
+
+def fetch_put_candidates(
+    tickers: list[str], min_dte: int = 30, max_dte: int = 45
+) -> dict[str, dict]:
+    """Fetch OTM put options in the target DTE range for each ticker.
+
+    Returns {ticker: {"current_price", "beta", "expiration", "dte", "puts": [...]}}
+    Each put entry: {"strike", "bid", "ask", "volume", "open_interest", "implied_volatility"}
+    """
+    from datetime import datetime, date
+
+    results: dict[str, dict] = {}
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info if isinstance(t.info, dict) else {}
+            current_price = _safe_float(info.get("currentPrice")) or _safe_float(
+                info.get("regularMarketPrice")
+            )
+            beta = _safe_float(info.get("beta"))
+
+            expirations = t.options  # tuple of date strings
+            if not expirations:
+                return ticker, {}
+
+            today = date.today()
+
+            # Find expiration closest to target DTE range
+            best_exp: str | None = None
+            best_dte: int | None = None
+            # First pass: look within range
+            for exp_str in expirations:
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if min_dte <= dte <= max_dte:
+                    if best_dte is None or dte < best_dte:
+                        best_exp = exp_str
+                        best_dte = dte
+            # Fallback: nearest expiration beyond min_dte
+            if best_exp is None:
+                for exp_str in expirations:
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if dte >= min_dte:
+                        if best_dte is None or dte < best_dte:
+                            best_exp = exp_str
+                            best_dte = dte
+
+            if best_exp is None or current_price is None:
+                return ticker, {"current_price": current_price, "beta": beta}
+
+            chain = t.option_chain(best_exp)
+            puts_df = chain.puts
+
+            # Filter OTM puts (strike < current_price)
+            otm = puts_df[puts_df["strike"] < current_price].copy()
+
+            candidates = []
+            for _, row in otm.iterrows():
+                bid = float(row.get("bid", 0)) if pd.notna(row.get("bid")) else 0
+                if bid <= 0:
+                    continue  # skip puts with no bid
+                candidates.append({
+                    "strike": float(row["strike"]),
+                    "bid": bid,
+                    "ask": float(row.get("ask", 0)) if pd.notna(row.get("ask")) else 0,
+                    "volume": int(row["volume"]) if pd.notna(row.get("volume")) else 0,
+                    "open_interest": int(row["openInterest"]) if pd.notna(row.get("openInterest")) else 0,
+                    "implied_volatility": float(row["impliedVolatility"]) if pd.notna(row.get("impliedVolatility")) else 0,
+                })
+
+            return ticker, {
+                "current_price": current_price,
+                "beta": beta,
+                "expiration": best_exp,
+                "dte": best_dte,
+                "puts": candidates,
+            }
+        except Exception:
+            return ticker, {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, data = future.result()
+            results[ticker] = data
+
+    return results
+
+
 def _days_to_period(days: int) -> str:
     if days <= 5:
         return "5d"

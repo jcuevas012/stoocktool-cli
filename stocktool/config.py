@@ -20,6 +20,7 @@ MARGIN_RULES = [
     (40, 0.65, "EXTREME FEAR"),
     (35, 0.45, "HIGH FEAR"),
     (30, 0.25, "ELEVATED"),
+    (28, 0.15, "EARLY WARNING"),
 ]
 
 # Google Sheets settings
