@@ -481,8 +481,9 @@ def strategy_dip(
     when and how much margin to deploy during market dips.
     """
     from . import data, display
-    from .config import MARGIN_RULES
+    from .config import MARGIN_RULES, MAX_MARGIN_PCT
     from .portfolio import load_portfolio
+    used_margin = data.get_used_margin()
 
     portfolio = load_portfolio()
     if not portfolio.positions:
@@ -503,7 +504,98 @@ def strategy_dip(
                 margin_rule = (deploy_pct, label)
                 break
 
-    display.render_dip_alert(vix_data, margin_rule, sma_data, sma_days)
+    # Compute total portfolio market value from sma_data prices + portfolio shares
+    total_market_value = 0.0
+    for pos in portfolio.positions:
+        price = sma_data.get(pos.ticker, {}).get("current_price")
+        if price:
+            total_market_value += pos.shares * price
+
+    max_margin_pool = total_market_value * MAX_MARGIN_PCT
+
+    display.render_dip_alert(vix_data, margin_rule, sma_data, sma_days, total_market_value, max_margin_pool, used_margin)
+
+
+# ---------------------------------------------------------------------------
+# stocktool strategy margin
+# ---------------------------------------------------------------------------
+
+@strategy_app.command("margin")
+def strategy_margin(
+    amount: Optional[float] = typer.Argument(None, help="Set used margin amount in dollars (omit to show current status)."),
+    reset: bool = typer.Option(False, "--reset", "-r", help="Reset used margin to $0."),
+) -> None:
+    """Track margin in use.
+
+    Run with no arguments to show current margin status.
+    Pass an amount to record how much margin you currently have deployed.
+
+    Examples:
+        stocktool strategy margin          # show current status
+        stocktool strategy margin 3500     # record $3,500 used
+        stocktool strategy margin --reset  # clear back to $0
+    """
+    from . import data
+    from .config import MAX_MARGIN_PCT
+    from .portfolio import load_portfolio
+
+    if reset:
+        data.set_used_margin(0.0)
+        console.print("[green]Margin usage reset to $0.[/green]")
+        return
+
+    if amount is not None:
+        if amount < 0:
+            console.print("[red]Amount must be >= 0.[/red]")
+            raise typer.Exit(1)
+        data.set_used_margin(amount)
+        console.print(f"[green]Used margin updated to [bold]${amount:,.0f}[/bold].[/green]")
+
+    # Always show current status
+    used = data.get_used_margin()
+    portfolio = load_portfolio()
+    if not portfolio.positions:
+        console.print(f"[bold]Used margin:[/bold] ${used:,.0f}  (no portfolio loaded for pool calculation)")
+        return
+
+    from . import data as _data
+    tickers = portfolio.tickers()
+    with console.status("Fetching prices..."):
+        prices = _data.get_current_prices(tickers)
+
+    total_value = sum(pos.shares * prices.get(pos.ticker, 0.0) for pos in portfolio.positions)
+    pool = total_value * MAX_MARGIN_PCT
+    remaining = max(pool - used, 0.0)
+    used_pct = (used / pool * 100) if pool > 0 else 0.0
+
+    from rich.table import Table
+    table = Table(title="Margin Status", header_style="bold cyan", show_lines=True)
+    table.add_column("Metric", style="bold")
+    table.add_column("Amount", justify="right")
+    table.add_column("Notes", style="dim")
+
+    table.add_row("Portfolio Value", f"${total_value:,.0f}", "current market value")
+    table.add_row(
+        "Max Margin Pool",
+        f"${pool:,.0f}",
+        f"{MAX_MARGIN_PCT:.0%} of portfolio — your hard cap",
+    )
+    used_style = "red" if used_pct > 80 else "yellow" if used_pct > 40 else "green"
+    table.add_row(
+        "Used Margin",
+        f"[{used_style}]${used:,.0f}[/{used_style}]",
+        f"{used_pct:.1f}% of pool deployed",
+    )
+    table.add_row(
+        "Remaining Capacity",
+        f"[bold]${remaining:,.0f}[/bold]",
+        "available to deploy",
+    )
+    console.print(table)
+    console.print(
+        f"\n[dim]Update with:[/dim] [bold]stocktool strategy margin <amount>[/bold]  "
+        f"[dim]or[/dim] [bold]stocktool strategy margin --reset[/bold]"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import yfinance as yf
+
+from .config import MARGIN_STATE_FILE, ensure_config_dir
+
+
+def get_used_margin() -> float:
+    """Return the currently recorded used margin amount (default 0)."""
+    if MARGIN_STATE_FILE.exists():
+        try:
+            return float(json.loads(MARGIN_STATE_FILE.read_text()).get("used_margin", 0.0))
+        except Exception:
+            pass
+    return 0.0
+
+
+def set_used_margin(amount: float) -> None:
+    """Persist the used margin amount to disk."""
+    ensure_config_dir()
+    MARGIN_STATE_FILE.write_text(json.dumps({"used_margin": amount}))
 
 
 def fetch_fundamentals(tickers: list[str]) -> dict[str, dict]:

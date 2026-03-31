@@ -12,10 +12,15 @@ else:
 
 CONFIG_DIR = Path.home() / ".config" / "stocktool"
 PORTFOLIO_FILE = CONFIG_DIR / "portfolio.json"
+MARGIN_STATE_FILE = CONFIG_DIR / "margin_state.json"
 
 DEFAULT_HORIZON_DAYS = 90
 
 VIX_TICKER = "^VIX"
+
+# Personal margin safety rule: never exceed this fraction of portfolio value as total margin
+MAX_MARGIN_PCT = 0.25
+
 MARGIN_RULES = [
     (40, 0.65, "EXTREME FEAR"),
     (35, 0.45, "HIGH FEAR"),

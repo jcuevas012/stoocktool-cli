@@ -885,6 +885,9 @@ def render_dip_alert(
     margin_rule: tuple[float, str] | None,
     sma_data: dict[str, dict],
     sma_days: int = 200,
+    total_market_value: float = 0.0,
+    max_margin_pool: float = 0.0,
+    used_margin: float = 0.0,
 ) -> None:
     """Render the market dip alert: VIX gauge, margin signal, and SMA dip candidates."""
     from rich.console import Group
@@ -931,11 +934,33 @@ def render_dip_alert(
         else:
             signal_color = "cyan"
 
+        parts: list[tuple[str, str]] = [
+            ("  Signal:     ", "bold"), (label, f"bold {signal_color}"), ("\n", ""),
+            ("  VIX rule:   ", "bold"), (f"deploy {deploy_pct:.0%} of margin pool", signal_color), ("\n", ""),
+        ]
+        if max_margin_pool > 0:
+            from .config import MAX_MARGIN_PCT
+            deploy_now = max_margin_pool * deploy_pct
+            remaining_capacity = max(max_margin_pool - used_margin, 0.0)
+            can_deploy = min(deploy_now, remaining_capacity)
+            used_pct = (used_margin / max_margin_pool * 100) if max_margin_pool > 0 else 0.0
+            used_color = "red" if used_pct > 80 else "yellow" if used_pct > 40 else "green"
+
+            parts += [
+                ("  Margin pool:   ", "bold"), (f"${max_margin_pool:,.0f}", "white"),
+                (f"  ({MAX_MARGIN_PCT:.0%} of ${total_market_value:,.0f} portfolio — hard cap)\n", "dim"),
+                ("  Used margin:   ", "bold"), (f"${used_margin:,.0f}", used_color),
+                (f"  ({used_pct:.1f}% of pool deployed)\n", "dim"),
+                ("  Remaining:     ", "bold"), (f"${remaining_capacity:,.0f}", "white"),
+                ("  available\n", "dim"),
+                ("  Target deploy: ", "bold"), (f"${deploy_now:,.0f}", f"bold {signal_color}"),
+                (f"  ({deploy_pct:.0%} of pool per VIX rule)\n", "dim"),
+                ("  Can deploy:    ", "bold"), (f"${can_deploy:,.0f}", f"bold {signal_color}"),
+                ("  (remaining capacity, capped at target)", "dim"),
+            ]
+
         console.print(Panel(
-            Text.assemble(
-                ("  Signal:  ", "bold"), (label, f"bold {signal_color}"), ("\n", ""),
-                ("  Deploy:  ", "bold"), (f"{deploy_pct:.0%} of available margin", f"bold {signal_color}"),
-            ),
+            Text.assemble(*parts),
             title="[bold cyan]Margin Deployment Signal[/bold cyan]",
             border_style=signal_color,
         ))
@@ -977,14 +1002,35 @@ def render_dip_alert(
 
     # ── Summary ──
     vix_str = f"{vix:.1f}" if vix is not None else "N/A"
-    deploy_str = f"{margin_rule[0]:.0%}" if margin_rule else "0%"
+    deploy_pct_val = margin_rule[0] if margin_rule else 0.0
+    deploy_str = f"{deploy_pct_val:.0%}" if margin_rule else "0%"
     label_str = margin_rule[1] if margin_rule else "LOW FEAR"
     below_count = len(below)
     below_tickers = ", ".join(t for t, _ in below) if below else "none"
 
+    margin_summary = ""
+    if max_margin_pool > 0:
+        if margin_rule:
+            deploy_now = max_margin_pool * deploy_pct_val
+            remaining_capacity = max(max_margin_pool - used_margin, 0.0)
+            can_deploy = min(deploy_now, remaining_capacity)
+            margin_summary = (
+                f" → pool [bold]${max_margin_pool:,.0f}[/bold]"
+                f" | used [bold]${used_margin:,.0f}[/bold]"
+                f" | can deploy [bold]${can_deploy:,.0f}[/bold]"
+            )
+        else:
+            remaining_capacity = max(max_margin_pool - used_margin, 0.0)
+            margin_summary = (
+                f" → pool [bold]${max_margin_pool:,.0f}[/bold]"
+                f" | used [bold]${used_margin:,.0f}[/bold]"
+                f" | remaining [bold]${remaining_capacity:,.0f}[/bold]"
+            )
+
     console.print(Panel(
         f"[bold]VIX at {vix_str}[/bold] → [bold]{label_str}[/bold] → "
-        f"Deploy [bold]{deploy_str}[/bold] margin → "
+        f"[bold]{deploy_str}[/bold] of margin pool"
+        f"{margin_summary} → "
         f"[bold]{below_count}[/bold] position(s) below {sma_days}d SMA: {below_tickers}",
         title="[bold magenta]Strategy Summary[/bold magenta]",
         border_style="magenta",
