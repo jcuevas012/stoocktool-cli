@@ -49,6 +49,8 @@ def analyze(
     tickers: list[str] = typer.Argument(..., help="One or more ticker symbols."),
     horizon: int = typer.Option(DEFAULT_HORIZON_DAYS, "--horizon", "-h", help="Lookback window in days."),
     scores: bool = typer.Option(False, "--scores", "-s", help="Color-code values by quality scores."),
+    html: bool = typer.Option(False, "--html", is_flag=True, help="Export a self-contained HTML report to the default path."),
+    html_path: Optional[str] = typer.Option(None, "--html-path", help="Custom path for the HTML report (implies --html)."),
 ) -> None:
     """Fetch fundamental data and display an analysis table."""
     from . import data, analysis, display
@@ -64,6 +66,11 @@ def analyze(
     ]
     display.render_fundamental_table(snapshots, show_scores=scores, horizon_days=horizon)
 
+    if html or html_path:
+        from .html_report import generate_html_report
+        out = generate_html_report(snapshots, output_path=html_path or None)
+        console.print(f"[green]HTML report saved:[/green] {out}")
+
 
 # ---------------------------------------------------------------------------
 # stocktool valuation
@@ -72,6 +79,8 @@ def analyze(
 @app.command()
 def valuation(
     tickers: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+    html: bool = typer.Option(False, "--html", is_flag=True, help="Export a self-contained HTML report to the default path."),
+    html_path: Optional[str] = typer.Option(None, "--html-path", help="Custom path for the HTML report (implies --html)."),
 ) -> None:
     """Valuation template: PE category, cash/debt health, future market cap & possible return.
 
@@ -100,6 +109,11 @@ def valuation(
         for t in tickers
     ]
     display.render_valuation(snapshots)
+
+    if html or html_path:
+        from .html_report import generate_html_report
+        out = generate_html_report(snapshots, output_path=html_path or None)
+        console.print(f"[green]HTML report saved:[/green] {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +619,8 @@ def strategy_margin(
 @app.command("owner-earnings")
 def owner_earnings(
     tickers: list[str] = typer.Argument(..., help="One or more ticker symbols."),
+    html: bool = typer.Option(False, "--html", is_flag=True, help="Export a self-contained HTML report to the default path."),
+    html_path: Optional[str] = typer.Option(None, "--html-path", help="Custom path for the HTML report (implies --html)."),
 ) -> None:
     """Owner Earnings: what the business really earns in cash.
 
@@ -636,6 +652,11 @@ def owner_earnings(
 
     if no_data:
         console.print(f"[dim]No cash flow data available for: {', '.join(no_data)}[/dim]")
+
+    if (html or html_path) and snapshots:
+        from .html_report import generate_html_report
+        out = generate_html_report(snapshots, output_path=html_path or None)
+        console.print(f"[green]HTML report saved:[/green] {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +726,148 @@ def strategy_puts(
 
     if no_options:
         console.print(f"[dim]No options data available for: {', '.join(no_options)}[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# stocktool docs  — quick-reference guide
+# ---------------------------------------------------------------------------
+
+@app.command("docs")
+def docs() -> None:
+    """Show a quick-reference guide for all commands, flags, and thresholds."""
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.columns import Columns
+    from rich import box
+
+    console.print()
+    console.print(Panel(
+        "[bold cyan]stocktool[/bold cyan] — Mid-term stock fundamental analysis & portfolio tracker\n"
+        "[dim]No API key required · powered by yfinance[/dim]",
+        title="[bold]Quick Reference Guide[/bold]",
+        border_style="cyan",
+    ))
+
+    # ── Commands ──────────────────────────────────────────────────────────────
+    cmd_table = Table(title="Commands", box=box.SIMPLE_HEAVY, header_style="bold cyan", show_lines=False)
+    cmd_table.add_column("Command", style="bold green", no_wrap=True)
+    cmd_table.add_column("Description")
+    cmd_table.add_column("Key Flags", style="dim")
+
+    rows = [
+        ("analyze AAPL MSFT",            "Fundamental data table",                          "--horizon 90  --scores"),
+        ("compare AAPL MSFT GOOGL",       "Side-by-side comparison (color-scored)",          "--horizon 60"),
+        ("valuation AAPL MSFT",           "Full value-investing template + projected return", ""),
+        ("value AAPL MSFT",               "Quick P/E · P/B · P/FCF check",                   ""),
+        ("owner-earnings AAPL MSFT",      "Buffett owner-earnings + multi-year trend",        ""),
+        ("portfolio show",                "P&L summary + allocation chart",                   "--horizon 90  --no-chart"),
+        ("portfolio add TICKER SH COST",  "Add / accumulate shares (weighted avg cost)",      "--etf"),
+        ("portfolio sell TICKER SH",      "Reduce shares (cost basis unchanged)",             ""),
+        ("portfolio remove TICKER",       "Remove position entirely",                         ""),
+        ("portfolio target TICKER PCT",   "Set target allocation weight",                     ""),
+        ("portfolio analyze",             "Run fundamental analysis on all holdings",         "--horizon 90  --scores"),
+        ("portfolio rebalance",           "Show over/under-weight signals",                   ""),
+        ("portfolio sma",                 "Screen holdings vs moving average",                "--days 200"),
+        ("portfolio overlap",             "Direct + ETF indirect exposure overlap",           ""),
+        ("portfolio migrate",             "Copy local JSON → Google Sheets",                  ""),
+        ("etf compare VOO QQQM SPY",      "Side-by-side ETF overview + holdings + sectors",  ""),
+        ("strategy dip",                  "VIX fear gauge + margin deployment signal",        "--sma-days 200"),
+        ("strategy puts",                 "Cash-secured put screener (Buffett style)",        "--min-dte 30  --max-dte 45  --otm 5.0"),
+        ("strategy margin [AMOUNT]",      "Track / update margin in use",                     "--reset"),
+    ]
+    for cmd, desc, flags in rows:
+        cmd_table.add_row(f"stocktool {cmd}", desc, flags)
+    console.print(cmd_table)
+
+    # ── Scoring thresholds ────────────────────────────────────────────────────
+    score_table = Table(title="Scoring Thresholds  (analyze / compare)", box=box.SIMPLE_HEAVY, header_style="bold cyan")
+    score_table.add_column("Metric", style="bold")
+    score_table.add_column("Green (Good)", style="green")
+    score_table.add_column("Yellow (Fair)", style="yellow")
+    score_table.add_column("Red (Concern)", style="red")
+    for row in [
+        ("P/E",           "< 15",   "15–30",   "> 30 or < 0"),
+        ("EPS/Rev Growth","  > 15%", "0–15%",   "< 0%"),
+        ("Profit Margin", "> 20%",  "5–20%",   "< 5%"),
+        ("Debt/Equity",   "< 50",   "50–150",  "> 150"),
+        ("ROE",           "> 20%",  "10–20%",  "< 10%"),
+        ("P/B",           "< 3×",   "3–6×",    "> 6× or < 0"),
+        ("Horizon Return","> 5%",   "0–5%",    "< 0%"),
+    ]:
+        score_table.add_row(*row)
+
+    # ── Value check thresholds ────────────────────────────────────────────────
+    value_table = Table(title="Value Check  (value cmd)", box=box.SIMPLE_HEAVY, header_style="bold cyan")
+    value_table.add_column("Metric", style="bold")
+    value_table.add_column("Green", style="green")
+    value_table.add_column("Yellow", style="yellow")
+    value_table.add_column("Red", style="red")
+    for row in [
+        ("P/E",   "< 15",  "15–25", "> 25 or neg"),
+        ("P/B",   "< 1.5", "1.5–3", "> 3 or neg"),
+        ("P/FCF", "< 15",  "15–25", "> 25 or neg"),
+    ]:
+        value_table.add_row(*row)
+
+    console.print(Columns([score_table, value_table], equal=False, expand=False))
+
+    # ── Owner Earnings thresholds ─────────────────────────────────────────────
+    oe_table = Table(title="Owner Earnings Thresholds", box=box.SIMPLE_HEAVY, header_style="bold cyan")
+    oe_table.add_column("Metric", style="bold")
+    oe_table.add_column("Green", style="green")
+    oe_table.add_column("Yellow", style="yellow")
+    oe_table.add_column("Red", style="red")
+    for row in [
+        ("OE vs Net Income",    "> +10%",  "−10% to +10%", "< −10%"),
+        ("OE Yield",            ">= 8%",   "4–8%",          "< 4%"),
+        ("Capital Intensity",   "< 25%",   "25–50%",        ">= 50%"),
+    ]:
+        oe_table.add_row(*row)
+    console.print(oe_table)
+
+    # ── VIX / Margin rules ────────────────────────────────────────────────────
+    vix_table = Table(title="VIX Margin Rules  (strategy dip)", box=box.SIMPLE_HEAVY, header_style="bold cyan")
+    vix_table.add_column("VIX Level", style="bold")
+    vix_table.add_column("Deploy %", justify="right")
+    vix_table.add_column("Signal")
+    for row in [
+        ("< 28",  "0%",  "LOW FEAR — no margin deployment"),
+        ("~28",  "15%", "EARLY WARNING"),
+        ("~30",  "25%", "ELEVATED"),
+        ("~35",  "45%", "HIGH FEAR"),
+        (">= 40","65%", "EXTREME FEAR"),
+    ]:
+        vix_table.add_row(*row)
+
+    # ── Rebalancing rules ─────────────────────────────────────────────────────
+    reb_table = Table(title="Rebalancing Signals", box=box.SIMPLE_HEAVY, header_style="bold cyan")
+    reb_table.add_column("State", style="bold")
+    reb_table.add_column("Condition")
+    reb_table.add_row("[red]OVERWEIGHT[/red]",   "current > target + 2%")
+    reb_table.add_row("[yellow]UNDERWEIGHT[/yellow]", "current < target − 2%")
+    reb_table.add_row("[green]ON TARGET[/green]",    "within ±2%")
+
+    console.print(Columns([vix_table, reb_table], equal=False, expand=False))
+
+    # ── Valuation projection ──────────────────────────────────────────────────
+    console.print(Panel(
+        "[bold]Valuation projection formula:[/bold]\n"
+        "  Projected Earnings  = Next-Year Revenue Estimate × Profit Margin\n"
+        "  Future Market Cap   = Projected Earnings × 6-Month Avg P/E\n"
+        "  Possible Return     = Future Market Cap / Current Market Cap − 1\n\n"
+        "[bold]Possible Return verdicts:[/bold]\n"
+        "  [green]>= 50%[/green]  Strong opportunity\n"
+        "  [yellow]15–50%[/yellow]  Moderate upside — monitor fundamentals\n"
+        "  [dim] 0–15%[/dim]  Limited upside at current price\n"
+        "  [red]  < 0%[/red]  Projected downside — re-evaluate",
+        title="Valuation Command",
+        border_style="dim",
+    ))
+
+    console.print(
+        "[dim]Run any command with [bold]--help[/bold] for full option details.  "
+        "e.g. [bold]stocktool valuation --help[/bold][/dim]\n"
+    )
 
 
 # ---------------------------------------------------------------------------

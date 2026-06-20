@@ -26,6 +26,9 @@ stocktool/
 │                   fetch_sma_data, fetch_vix, fetch_etf_info, fetch_etf_performance,
 │                   compute_holdings_overlap, fetch_portfolio_etf_holdings,
 │                   fetch_owner_earnings, fetch_put_candidates
+├── html_report.py — Self-contained HTML report generator: generate_html_report(snapshots, output_path)
+│                   No external deps (stdlib only + existing packages). Inline CSS dark theme,
+│                   card grid layout, color-coded badges, SVG bar charts, tab-based multi-ticker nav.
 ├── analysis.py   — FundamentalSnapshot + ValuationSnapshot + ValueCheckSnapshot +
 │                   CashSecuredPutSnapshot + OwnerEarningsSnapshot dataclasses,
 │                   build_snapshot(), build_valuation_snapshot(), build_value_check_snapshot(),
@@ -41,7 +44,32 @@ stocktool/
 └── cli.py        — Typer app + subcommands; calls data → analysis/portfolio → display
 ```
 
-**Dependency direction**: `config → data/analysis/portfolio/sheets → cli`; `display` only imported by `cli`.
+**Dependency direction**: `config → data/analysis/portfolio/sheets → cli`; `display` only imported by `cli`; `html_report` only imported by `cli` (lazy, on --html flag).
+
+## HTML Report Export (`--html`)
+
+Commands `analyze`, `valuation`, and `owner-earnings` accept an optional `--html [PATH]` flag.
+
+```bash
+stocktool analyze AAPL MSFT --html
+stocktool valuation AAPL MSFT GOOGL --html
+stocktool owner-earnings AAPL MSFT --html
+stocktool analyze AAPL --html /path/to/report.html  # custom path
+```
+
+**Behavior:**
+- When `--html` is provided without a path, the report is saved to `~/.config/stocktool/report_<TICKERS>_<DATE>.html`
+- The file is opened automatically in the default browser after generation
+- Terminal Rich output is still rendered normally alongside the HTML export
+
+**html_report.py design principles:**
+- No new Python dependencies — only stdlib (`html`, `pathlib`, `datetime`, `webbrowser`) plus packages already installed
+- Self-contained HTML: all CSS inline in a `<style>` block, no external fonts/CDN/scripts
+- Dark theme, card-based grid layout, responsive at 1280px
+- Color-coded badges use the same thresholds as `analysis.py` (green/yellow/red scale functions imported directly — never duplicated)
+- Multi-ticker reports include tab pills (JS only for tab switching) + a side-by-side comparison table
+- Owner Earnings section includes a pure SVG horizontal bar chart for the multi-year trend
+- `generate_html_report(snapshots, output_path=None, open_browser=True) -> str` is the single public function
 
 ## Portfolio Persistence
 
@@ -107,6 +135,8 @@ stocktool portfolio migrate
 stocktool etf compare VOO QQQM SPY
 stocktool strategy dip [--sma-days 200]
 stocktool strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
+stocktool strategy margin [AMOUNT] [--reset]
+stocktool docs
 ```
 
 ## ETF Support
