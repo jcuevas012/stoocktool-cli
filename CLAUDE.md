@@ -102,6 +102,17 @@ stocktool portfolio add AAPL 10 182.50
 stocktool portfolio migrate
 ```
 
+### FMP Setup (optional)
+
+Only needed for `stocktool etf valuation`'s true 5-year historical average P/E — the command works fully without it.
+
+```bash
+# 1. Get a free key at financialmodelingprep.com (250 requests/day free tier)
+# 2. Add it to .env:
+echo 'FMP_API_KEY=' >> .env
+# 3. Omit entirely to use the yfinance-only proxy instead — no setup required.
+```
+
 ## Key yfinance Notes
 
 - Always use `group_by="ticker"` with `yf.download()` to ensure consistent MultiIndex
@@ -113,6 +124,10 @@ stocktool portfolio migrate
 - `ticker.revenue_estimate` returns a DataFrame indexed by period (`'0q'`, `'+1q'`, `'0y'`, `'+1y'`)
 - `ticker.balance_sheet` index key for total assets: try `"Total Assets"` then `"TotalAssets"`
 - ETF top holdings: use `ticker.funds_data.top_holdings` (returns DataFrame with Symbol index, `"Name"` and `"Holding Percent"` columns). The `.info["holdings"]` key is no longer populated by yfinance.
+- `funds_data.top_holdings`'s `"Holding Percent"` column is a true fraction (0.08 = 8%), not a decimal-percentage — unlike `dividendYield` above.
+- `annualReportExpenseRatio` and `trailingAnnualDividendYield` are no longer populated for most ETFs. Use `netExpenseRatio` and `dividendYield` instead — both are "decimal percentage" fields (0.03 = 0.03%, 1.07 = 1.07%) like `dividendYield` above, so divide by 100 to store as a true fraction if that's your field's convention.
+- ETFs often lack `currentPrice` in `.info` (populated as `regularMarketPrice`/`previousClose` instead, or not at all). `stocktool etf valuation` sidesteps this by sourcing current price from price-history close throughout, rather than from `.info`.
+- Per-stock `earningsGrowth` is a noisy trailing YoY figure that can spike to 1000%+ off a near-zero prior-year base (e.g. a cyclical semiconductor coming out of a down year) — clip/cap it before using in any weighted or aggregate calculation.
 
 ## Commands
 
@@ -133,6 +148,7 @@ stocktool portfolio sma [--days 200]
 stocktool portfolio overlap
 stocktool portfolio migrate
 stocktool etf compare VOO QQQM SPY
+stocktool etf valuation VOO QQQM [--html]
 stocktool strategy dip [--sma-days 200]
 stocktool strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
 stocktool strategy margin [AMOUNT] [--reset]
@@ -166,6 +182,63 @@ Compares 2+ ETFs side-by-side:
 - **Sector Breakdown:** Sector weights per ETF side-by-side
 
 **Note:** yfinance ETF data varies — expense ratio, holdings, and sector weights may show N/A for some ETFs. Holdings overlap is based on top reported holdings only (not full fund composition).
+
+## ETF Valuation (`stocktool etf valuation`)
+
+Value-investing template for ETFs: PEGY ratio, P/E-reversion fair value, margin of safety, a 5-year growth projection, and two disciplined entry price tiers. Mirrors the visual style of `stocktool valuation` (same Rich Panel conventions, same `Valuación de Activos: {TICKER}` title).
+
+**Data fetched:** ETF `.info` (via `fetch_etf_info`, extended with `trailing_pe`/`forward_pe`/`category`) + top-10 holdings via `funds_data.top_holdings` (`fetch_portfolio_etf_holdings`) + per-holding `.info` for PE/growth (`fetch_holding_fundamentals`) + 5-year price history for EMA-50/SMA-200/52w-hi-lo/proxy average price (`fetch_etf_technicals`) + optional Financial Modeling Prep call for true 5-year average P/E (`fmp.fetch_historical_pe`).
+
+**Sections rendered (one panel per ticker):**
+
+| # | Section | Key Metric | Source |
+|---|---------|------------|--------|
+| 1 | Basket Concentration & Top Holdings | Top-10 weight sum, holdings table | `funds_data.top_holdings` |
+| 2 | Valuation Multiples & PEGY | Trailing P/E, forward EPS growth, distribution yield, PEGY | ETF `.info` or weighted top-10 holdings |
+| 3 | Historical Valuation Bands & NAV | 5Y avg P/E, fair value, entry zone | FMP or yfinance price-proxy |
+| 4 | Valuation Projection (5-Year Growth View) | Projected price, total return, CAGR | computed |
+| 5 | Entry Strategy & Margin of Safety | Margin of safety, Tier 1/Tier 2 entries, rating | computed |
+
+**Formulas (`analysis.py`):**
+
+```
+Concentration       = sum(top-10 holding weights)
+PEGY                = Trailing P/E / (Forward EPS Growth % + Distribution Yield %)   [None if growth <= 0]
+Fair Value          = Current Price × (5Y Avg P/E / Trailing P/E)
+Margin of Safety    = (Fair Value − Current Price) / Current Price × 100
+Projected EPS (5Y)  = Current EPS-equivalent × (1 + growth_rate)^5      [EPS-equivalent = Price / Trailing P/E]
+Projected Price (5Y)= Projected EPS × Terminal P/E (= 5Y Avg P/E)
+Tier 1 (DCA Pullback)        = min(50-day EMA, Current Price × 0.95)
+Tier 2 (Valuation Reversion) = min(Fair Value, 200-day SMA)
+```
+
+**Basket-level trailing P/E and forward growth:** the ETF's own `.info["trailingPE"]` is used if populated; otherwise a weighted **harmonic** mean of the top-10 holdings' trailing P/E (`sum(weights) / sum(weight/pe)`), covering only holdings with a valid positive P/E — the coverage (e.g. "8/10 holdings, 71% of top-10 weight") is shown alongside. Forward EPS growth is a weighted arithmetic mean of the top-10 holdings' `earningsGrowth`, each **clipped to [-30%, +50%]** before weighting (see the yfinance note above on noisy per-stock growth figures) — this is intentionally tighter than a literal "no clipping" reading of the SRS, mirroring how `_select_dcf_growth_rate` already caps even high-ROIC stock-level growth at 15%.
+
+**Growth rate used for the 5-year projection:** `min(forward_eps_growth / 100, 0.15)` if positive, else a `0.06` default — capped to prevent a single outlier holding from compounding into an unrealistic 5-year figure, floored higher than the stock-side DCF's 4% default since a diversified basket of large caps rarely has zero growth.
+
+**Rating ladder (`determine_etf_rating`):**
+
+| Condition | Rating |
+|-----------|--------|
+| PEGY < 1.5 and MoS > 10% | ★★★★★ Strong Buy (green) |
+| PEGY < 2.0 and MoS > 0% | ★★★★☆ Buy/Accumulate (green) |
+| 2.0 ≤ PEGY ≤ 2.8 | ★★★☆☆ Hold/DCA on Pullbacks (yellow) |
+| PEGY > 2.8 or MoS < -20% | ★★☆☆☆ Overvalued/Trim (red) |
+| PEGY and MoS both present, none of the above | ★★☆☆☆ Hold/Neutral (yellow) |
+| PEGY or MoS missing | ☆☆☆☆☆ Insufficient Data (dim) |
+
+The "Hold/Neutral" rule isn't in the original spec — it fills a real gap in the literal ladder (e.g. PEGY=1.7, MoS=-5% matches none of the first four rules) so only genuinely missing data falls into "Insufficient Data".
+
+**Concentration thresholds:** green < 40% (diversified), yellow 40–60% (moderate), red > 60% (concentrated) — mirrors the existing `debt_to_assets_pct` 40/65 split style.
+
+### Financial Modeling Prep (FMP) integration — optional
+
+yfinance has no field for a true multi-year historical average P/E, which the Fair Value / Margin of Safety / 5-Year Projection formulas above all depend on. `stocktool etf valuation` optionally calls **Financial Modeling Prep** for this one field:
+
+- Set `FMP_API_KEY=...` in `.env` (get a free key at financialmodelingprep.com) to enable it. Omit it entirely — the command works fully without it.
+- Endpoint: `GET https://financialmodelingprep.com/stable/ratios?symbol={TICKER}&period=annual&limit=5&apikey={KEY}`, called **at most once per ETF ticker** (not per holding), to stay well within the free tier's 250 requests/day.
+- The exact P/E field name in FMP's response could not be verified against live documentation (the docs site blocks automated fetching) — `fmp.py` tries several candidate field names defensively (`priceToEarningsRatio`, `peRatio`, `priceEarningsRatio`) and falls back to the proxy below if none resolve. Re-verify with a real API key if FMP changes its schema.
+- **Fallback proxy** (used automatically with no key, on any API failure, or on a rate limit): `5Y Avg P/E ≈ mean(5-year price) × (current Trailing P/E / current Price)` — assumes the basket's aggregate earnings are roughly stable over the window. The `hist_pe_note` field on `ETFValuationSnapshot` always states which source was used.
 
 ## Pie Chart (`stocktool portfolio show`)
 
@@ -212,6 +285,51 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 - 15–50% → Moderate upside — monitor fundamentals
 - 0–15% → Limited upside at current price
 - < 0% → Projected downside — re-evaluate
+
+## DCF Intrinsic Value (Section 7 of `stocktool valuation`)
+
+Appended automatically to every `valuation` panel. Implements a 10-step Buffett Owner Earnings DCF.
+
+**Additional data fetched:** `fetch_cashflow_basics()` in `data.py` pulls depreciation + capex from the annual cashflow statement (same session as the other valuation fetches).
+
+**10-step methodology:**
+
+| Step | Description |
+|------|-------------|
+| 1 | Normalized Net Income = Revenue Est. × Profit Margin (fallback: FCF) |
+| 2 | Owner Earnings = NI + Depreciation + CapEx (yfinance capex is negative) |
+| 3 | Growth Rate — conservative: avg(revenue_growth, eps_growth) capped by ROE tier |
+| 4 | Discount Rate = 10% |
+| 5 | Terminal Growth = 2.5% |
+| 6 | Enterprise Value = PV(10yr OE) + PV(Terminal Value) |
+| 7 | Equity Value = EV + Cash − Debt |
+| 8 | Intrinsic Value Per Share = Equity Value / Shares Outstanding |
+| 9 | Margin of Safety = (IV − Price) / IV × 100 |
+| 10 | Rating based on margin of safety |
+
+**Growth rate selection (in `analysis._select_dcf_growth_rate`):**
+- High-ROIC (ROE > 25%) + avg growth ≥ 10% → cap at 15%
+- Solid allocator (ROE > 15% or avg growth ≥ 8%) → cap at 12%
+- Mature/average → cap at 8%
+- No positive growth signals → default 4%
+
+**Rating thresholds:**
+
+| Margin of Safety | Rating |
+|-----------------|--------|
+| > 40% | ★★★★★ Strong Buy |
+| 25–40% | ★★★★ Buy |
+| 15–25% | ★★★ Fair Value |
+| 5–15% | ★★ Hold |
+| < 5% | ★ Overvalued |
+
+**Fallback logic for Owner Earnings:**
+1. If D&A + CapEx from cashflow available → full formula
+2. Else if FCF > 0 → FCF used as proxy
+3. Else if NI > 0 → NI used as fallback
+4. If none positive → DCF section shows "insufficient data"
+
+**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
 
 ## Quick Value Check (`stocktool value`)
 

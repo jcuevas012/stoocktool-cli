@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
@@ -81,11 +81,35 @@ class ValuationSnapshot:
     analyst_upside_pct: Optional[float] = None   # (mean_target / current_price - 1) * 100
     num_analysts: Optional[int] = None
     recommendation_key: Optional[str] = None     # 'buy', 'hold', 'sell', 'strongBuy', etc.
-    # Projections
+    # Projections (existing PE-based)
     next_year_revenue_est: Optional[float] = None
     projected_earnings: Optional[float] = None   # next_year_rev * profit_margin
     future_market_cap: Optional[float] = None    # projected_earnings * avg_pe_6m
     possible_return_pct: Optional[float] = None  # (future_mktcap / mktcap - 1) * 100
+    # Extra fundamentals for DCF
+    shares_outstanding: Optional[float] = None
+    revenue_growth: Optional[float] = None       # decimal (0.10 = 10%)
+    eps_growth: Optional[float] = None           # decimal
+    roe: Optional[float] = None                  # decimal
+    roa: Optional[float] = None                  # decimal
+    free_cashflow: Optional[float] = None
+    # Cashflow statement data
+    depreciation: Optional[float] = None
+    capex_cf: Optional[float] = None             # negative value from yfinance
+    # DCF intrinsic value (10-step methodology)
+    dcf_net_income: Optional[float] = None       # step 1 normalized NI
+    dcf_owner_earnings: Optional[float] = None   # step 2
+    dcf_owner_earnings_note: Optional[str] = None
+    dcf_growth_rate: Optional[float] = None      # step 3
+    dcf_growth_note: Optional[str] = None
+    dcf_discount_rate: float = 0.10              # step 4
+    dcf_terminal_growth: float = 0.025           # step 5
+    dcf_enterprise_value: Optional[float] = None # step 6
+    dcf_equity_value: Optional[float] = None     # step 7
+    intrinsic_value_per_share: Optional[float] = None  # step 8
+    margin_of_safety_pct: Optional[float] = None       # step 9 (%)
+    iv_rating: Optional[str] = None             # step 10 label
+    iv_rating_color: Optional[str] = None       # "green" / "yellow" / "red"
 
 
 def pe_category(pe: Optional[float]) -> tuple[str, str]:
@@ -111,14 +135,82 @@ def cash_debt_rating(cash: Optional[float], debt: Optional[float]) -> tuple[str,
     return "CAUTION", "red"
 
 
+def _select_dcf_growth_rate(
+    revenue_growth: Optional[float],
+    eps_growth: Optional[float],
+    roe: Optional[float],
+    roa: Optional[float],
+) -> tuple[float, str]:
+    """Choose a conservative DCF growth rate. Returns (rate, explanation)."""
+    candidates = []
+    parts = []
+    if revenue_growth is not None and revenue_growth > 0:
+        candidates.append(revenue_growth)
+        parts.append(f"rev +{revenue_growth:.1%}")
+    if eps_growth is not None and eps_growth > 0:
+        candidates.append(eps_growth)
+        parts.append(f"EPS +{eps_growth:.1%}")
+
+    quality = roe or roa or 0.0
+
+    if not candidates:
+        return 0.04, "No positive growth signals found; conservative 4% default assumed"
+
+    avg = sum(candidates) / len(candidates)
+
+    # Cap based on capital-allocation quality (ROE/ROA as proxy for ROIC)
+    if quality > 0.25 and avg >= 0.10:
+        cap, tier = 0.15, "high-ROIC compounder (>25% ROE)"
+    elif quality > 0.15 or avg >= 0.08:
+        cap, tier = 0.12, "solid capital allocator"
+    else:
+        cap, tier = 0.08, "mature/average business"
+
+    rate = min(avg, cap)
+    note = f"Avg of {', '.join(parts)}, capped at {cap:.0%} for {tier}"
+    return rate, note
+
+
+def _run_dcf(
+    owner_earnings: float,
+    growth_rate: float,
+    discount_rate: float = 0.10,
+    terminal_growth: float = 0.025,
+    n_years: int = 10,
+) -> tuple[float, float]:
+    """Return (pv_of_projected_earnings, pv_of_terminal_value)."""
+    pv_oe = sum(
+        owner_earnings * (1 + growth_rate) ** t / (1 + discount_rate) ** t
+        for t in range(1, n_years + 1)
+    )
+    oe_year_n = owner_earnings * (1 + growth_rate) ** n_years
+    terminal_value = oe_year_n * (1 + terminal_growth) / (discount_rate - terminal_growth)
+    pv_tv = terminal_value / (1 + discount_rate) ** n_years
+    return pv_oe, pv_tv
+
+
+def _iv_rating(margin_of_safety: float) -> tuple[str, str]:
+    """Return (label, color) for a margin-of-safety fraction."""
+    if margin_of_safety > 0.40:
+        return "★★★★★ Strong Buy", "green"
+    if margin_of_safety > 0.25:
+        return "★★★★ Buy", "green"
+    if margin_of_safety > 0.15:
+        return "★★★ Fair Value", "yellow"
+    if margin_of_safety > 0.05:
+        return "★★ Hold", "yellow"
+    return "★ Overvalued", "red"
+
+
 def build_valuation_snapshot(
     ticker: str,
     info: dict,
     history_6m: pd.DataFrame,
     next_year_revenue: Optional[float],
     bs_data: Optional[dict] = None,
+    cf_data: Optional[dict] = None,
 ) -> "ValuationSnapshot":
-    """Build a ValuationSnapshot with projected future market cap and return."""
+    """Build a ValuationSnapshot with projected future market cap, return, and DCF intrinsic value."""
     bs_data = bs_data or {}
     eps = _safe_float(info.get("trailingEps"))
     current_price = _safe_float(info.get("currentPrice"))
@@ -160,7 +252,7 @@ def build_valuation_snapshot(
     if avg_pe_6m is None:
         avg_pe_6m = pe_ratio  # fallback to current PE
 
-    # Projections
+    # Projections (PE-based)
     projected_earnings: Optional[float] = None
     future_market_cap: Optional[float] = None
     possible_return_pct: Optional[float] = None
@@ -171,6 +263,72 @@ def build_valuation_snapshot(
         future_market_cap = projected_earnings * avg_pe_6m
     if future_market_cap and market_cap and market_cap > 0:
         possible_return_pct = (future_market_cap / market_cap - 1) * 100
+
+    # Extra fundamentals from .info
+    # Use market_cap / price as authoritative share count — sharesOutstanding from yfinance
+    # can omit share classes (e.g. GOOGL only returns Class A, missing Class B and C).
+    shares_outstanding: Optional[float] = None
+    if market_cap and current_price and current_price > 0:
+        shares_outstanding = market_cap / current_price
+    if shares_outstanding is None:
+        shares_outstanding = _safe_float(info.get("sharesOutstanding"))
+    revenue_growth = _safe_float(info.get("revenueGrowth"))
+    eps_growth = _safe_float(info.get("earningsGrowth"))
+    roe = _safe_float(info.get("returnOnEquity"))
+    roa = _safe_float(info.get("returnOnAssets"))
+    free_cashflow = _safe_float(info.get("freeCashflow"))
+
+    # Cashflow data (depreciation / capex for Owner Earnings)
+    cf_data = cf_data or {}
+    depreciation = _safe_float(cf_data.get("depreciation"))
+    capex_cf = _safe_float(cf_data.get("capex"))  # negative value in yfinance
+
+    # ── DCF Intrinsic Value (10-step Buffett methodology) ─────────────────
+    discount_rate = 0.10
+    terminal_growth = 0.025
+
+    # Step 1: Normalized Net Income
+    dcf_net_income: Optional[float] = None
+    if next_year_revenue and profit_margin:
+        dcf_net_income = next_year_revenue * profit_margin
+
+    # Step 2: Owner Earnings = NI + Dep - Maintenance CapEx
+    dcf_owner_earnings: Optional[float] = None
+    dcf_owner_earnings_note: Optional[str] = None
+    if dcf_net_income is not None and depreciation is not None and capex_cf is not None:
+        dcf_owner_earnings = dcf_net_income + depreciation + capex_cf  # capex_cf already negative
+        dcf_owner_earnings_note = "NI + D&A + CapEx (full formula)"
+    elif dcf_net_income is not None and free_cashflow is not None and free_cashflow > 0:
+        # FCF ≈ NI + D&A - CapEx, so use it as proxy when D&A/CapEx unavailable
+        dcf_owner_earnings = free_cashflow
+        dcf_owner_earnings_note = "Free Cash Flow used (D&A/CapEx unavailable)"
+    elif dcf_net_income is not None and dcf_net_income > 0:
+        dcf_owner_earnings = dcf_net_income
+        dcf_owner_earnings_note = "Net Income used as fallback (no FCF/D&A data)"
+
+    # Steps 3-10
+    dcf_growth_rate: Optional[float] = None
+    dcf_growth_note: Optional[str] = None
+    dcf_enterprise_value: Optional[float] = None
+    dcf_equity_value: Optional[float] = None
+    intrinsic_value_per_share: Optional[float] = None
+    margin_of_safety_pct: Optional[float] = None
+    iv_rating: Optional[str] = None
+    iv_rating_color: Optional[str] = None
+
+    if dcf_owner_earnings is not None and dcf_owner_earnings > 0:
+        dcf_growth_rate, dcf_growth_note = _select_dcf_growth_rate(revenue_growth, eps_growth, roe, roa)
+        pv_oe, pv_tv = _run_dcf(dcf_owner_earnings, dcf_growth_rate, discount_rate, terminal_growth)
+        dcf_enterprise_value = pv_oe + pv_tv
+        # Step 7: add cash, subtract debt
+        dcf_equity_value = dcf_enterprise_value + (total_cash or 0) - (total_debt or 0)
+        # Step 8: per-share
+        if shares_outstanding and shares_outstanding > 0:
+            intrinsic_value_per_share = dcf_equity_value / shares_outstanding
+        # Step 9 & 10
+        if intrinsic_value_per_share and current_price and intrinsic_value_per_share > 0:
+            margin_of_safety_pct = (intrinsic_value_per_share - current_price) / intrinsic_value_per_share * 100
+            iv_rating, iv_rating_color = _iv_rating(margin_of_safety_pct / 100)
 
     return ValuationSnapshot(
         ticker=ticker,
@@ -197,6 +355,346 @@ def build_valuation_snapshot(
         projected_earnings=projected_earnings,
         future_market_cap=future_market_cap,
         possible_return_pct=possible_return_pct,
+        shares_outstanding=shares_outstanding,
+        revenue_growth=revenue_growth,
+        eps_growth=eps_growth,
+        roe=roe,
+        roa=roa,
+        free_cashflow=free_cashflow,
+        depreciation=depreciation,
+        capex_cf=capex_cf,
+        dcf_net_income=dcf_net_income,
+        dcf_owner_earnings=dcf_owner_earnings,
+        dcf_owner_earnings_note=dcf_owner_earnings_note,
+        dcf_growth_rate=dcf_growth_rate,
+        dcf_growth_note=dcf_growth_note,
+        dcf_discount_rate=discount_rate,
+        dcf_terminal_growth=terminal_growth,
+        dcf_enterprise_value=dcf_enterprise_value,
+        dcf_equity_value=dcf_equity_value,
+        intrinsic_value_per_share=intrinsic_value_per_share,
+        margin_of_safety_pct=margin_of_safety_pct,
+        iv_rating=iv_rating,
+        iv_rating_color=iv_rating_color,
+    )
+
+
+@dataclass
+class ETFHolding:
+    symbol: str
+    name: str
+    weight_pct: float                            # 0-100 scale
+    trailing_pe: Optional[float] = None
+    forward_pe: Optional[float] = None
+    earnings_growth: Optional[float] = None       # decimal (0.10 = 10%)
+
+
+@dataclass
+class ETFValuationSnapshot:
+    ticker: str
+    long_name: Optional[str] = None
+    fund_family: Optional[str] = None
+    category: Optional[str] = None
+    current_price: Optional[float] = None
+    total_assets: Optional[float] = None            # AUM
+    expense_ratio: Optional[float] = None
+    distribution_yield_pct: Optional[float] = None  # already a %, per yfinance convention
+
+    # Section 1 — Basket Concentration & Top Holdings
+    holdings: list = field(default_factory=list)     # list[ETFHolding]
+    concentration_pct: Optional[float] = None        # sum of top-10 weights
+    holdings_pe_coverage_note: Optional[str] = None
+
+    # Section 2 — Valuation Multiples & PEGY
+    trailing_pe: Optional[float] = None
+    trailing_pe_source: Optional[str] = None          # "etf_info" | "weighted_holdings"
+    forward_eps_growth_pct: Optional[float] = None
+    pegy_ratio: Optional[float] = None
+    pegy_label: Optional[str] = None
+    pegy_color: Optional[str] = None
+
+    # Section 3 — Historical Valuation Bands & NAV
+    hist_5y_avg_pe: Optional[float] = None
+    hist_pe_note: Optional[str] = None
+    fair_value: Optional[float] = None
+    ema_50: Optional[float] = None
+    sma_200: Optional[float] = None
+    week_52_high: Optional[float] = None
+    week_52_low: Optional[float] = None
+    tier1_entry: Optional[float] = None               # DCA pullback
+    tier2_entry: Optional[float] = None               # valuation reversion
+
+    # Section 4 — 5-Year Projection
+    growth_rate_used: Optional[float] = None          # decimal
+    projected_eps_5y: Optional[float] = None
+    projected_price_5y: Optional[float] = None
+    total_return_pct: Optional[float] = None
+    cagr_pct: Optional[float] = None
+
+    # Section 5 — Entry Strategy & Rating
+    margin_of_safety_pct: Optional[float] = None
+    rating: Optional[str] = None
+    rating_color: Optional[str] = None
+
+
+def calculate_pegy(
+    trailing_pe: Optional[float],
+    forward_eps_growth_pct: Optional[float],
+    distribution_yield_pct: Optional[float],
+) -> Optional[float]:
+    """PEGY = trailing_pe / (growth_pct + yield_pct). None if any input missing or growth <= 0."""
+    if trailing_pe is None or forward_eps_growth_pct is None or distribution_yield_pct is None:
+        return None
+    if forward_eps_growth_pct <= 0:
+        return None
+    denom = forward_eps_growth_pct + distribution_yield_pct
+    if denom <= 0:
+        return None
+    return trailing_pe / denom
+
+
+def pegy_status(pegy: Optional[float]) -> tuple[str, str]:
+    """Return (label, color) bucket for a PEGY ratio."""
+    if pegy is None:
+        return "N/A", "dim"
+    if pegy < 1.0:
+        return "Undervalued", "green"
+    if pegy <= 2.0:
+        return "Fairly Valued", "yellow"
+    return "Overvalued", "red"
+
+
+def calculate_fair_value(
+    current_price: Optional[float],
+    hist_5y_avg_pe: Optional[float],
+    trailing_pe: Optional[float],
+) -> Optional[float]:
+    """Fair value via P/E reversion: current_price * (hist_5y_avg_pe / trailing_pe)."""
+    if current_price is None or hist_5y_avg_pe is None or not trailing_pe:
+        return None
+    return current_price * (hist_5y_avg_pe / trailing_pe)
+
+
+def calculate_margin_of_safety(
+    fair_value: Optional[float], current_price: Optional[float]
+) -> Optional[float]:
+    """(fair_value - current_price) / current_price * 100 — returns a percent."""
+    if fair_value is None or not current_price:
+        return None
+    return (fair_value - current_price) / current_price * 100
+
+
+def calculate_5y_projection(
+    current_eps: Optional[float],
+    growth_rate: Optional[float],
+    terminal_pe: Optional[float],
+    current_price: Optional[float],
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Return (projected_eps_5y, projected_price_5y, total_return_pct, cagr_pct)."""
+    if current_eps is None or growth_rate is None or terminal_pe is None or not current_price:
+        return None, None, None, None
+
+    projected_eps_5y = current_eps * (1 + growth_rate) ** 5
+    projected_price_5y = projected_eps_5y * terminal_pe
+    if projected_price_5y < 0:
+        return projected_eps_5y, projected_price_5y, None, None
+
+    total_return_pct = (projected_price_5y / current_price - 1) * 100
+    cagr_pct = ((projected_price_5y / current_price) ** (1 / 5) - 1) * 100
+    return projected_eps_5y, projected_price_5y, total_return_pct, cagr_pct
+
+
+def determine_etf_rating(
+    pegy: Optional[float], margin_of_safety_pct: Optional[float]
+) -> tuple[str, str]:
+    """Explicit top-to-bottom ladder, first match wins.
+
+    Rule 4b ("Hold/Neutral") is not in the source SRS — it fills a real gap in the
+    literal ladder (e.g. pegy=1.7, mos=-5 matches none of rules 1-4) so that only
+    genuinely missing data falls into the "Insufficient Data" catch-all.
+    """
+    mos = margin_of_safety_pct
+    if pegy is not None and mos is not None:
+        if pegy < 1.5 and mos > 10:
+            return "★★★★★ Strong Buy", "green"
+        if pegy < 2.0 and mos > 0:
+            return "★★★★☆ Buy/Accumulate", "green"
+        if 2.0 <= pegy <= 2.8:
+            return "★★★☆☆ Hold/DCA on Pullbacks", "yellow"
+        if pegy > 2.8 or mos < -20:
+            return "★★☆☆☆ Overvalued/Trim", "red"
+        return "★★☆☆☆ Hold/Neutral", "yellow"
+    if pegy is not None and pegy > 2.8:
+        return "★★☆☆☆ Overvalued/Trim", "red"
+    if mos is not None and mos < -20:
+        return "★★☆☆☆ Overvalued/Trim", "red"
+    return "☆☆☆☆☆ Insufficient Data", "dim"
+
+
+def _weighted_harmonic_pe(holdings: list[ETFHolding]) -> tuple[Optional[float], str]:
+    """Weighted harmonic-mean PE over holdings with a valid positive trailing PE."""
+    covered = [h for h in holdings if h.trailing_pe and h.trailing_pe > 0]
+    if not covered:
+        return None, f"0/{len(holdings)} holdings, 0% of top-10 weight"
+    weight_sum = sum(h.weight_pct for h in covered)
+    if weight_sum <= 0:
+        return None, f"0/{len(holdings)} holdings, 0% of top-10 weight"
+    weighted_pe = weight_sum / sum(h.weight_pct / h.trailing_pe for h in covered)
+    note = f"{len(covered)}/{len(holdings)} holdings, {weight_sum:.0f}% of top-10 weight"
+    return weighted_pe, note
+
+
+def _weighted_forward_growth(holdings: list[ETFHolding]) -> Optional[float]:
+    """Weighted arithmetic-mean forward EPS growth (decimal) over holdings with valid growth.
+
+    yfinance's per-stock earningsGrowth is a raw trailing YoY figure that can spike
+    to 1000%+ off a near-zero prior-year base (e.g. a cyclical semiconductor coming
+    out of a down year) — it is noisy, not a sustainable forward growth signal.
+    Clip each holding to [-30%, +50%] before weighting, mirroring how
+    _select_dcf_growth_rate already caps even high-ROIC compounders at 15% rather
+    than trusting raw growth figures — a wide-but-sane band prevents one outlier
+    name (or yfinance's noise) from producing an absurd basket-level growth rate.
+    """
+    covered = [h for h in holdings if h.earnings_growth is not None]
+    weight_sum = sum(h.weight_pct for h in covered)
+    if not covered or weight_sum <= 0:
+        return None
+    clipped = [max(-0.3, min(0.5, h.earnings_growth)) for h in covered]
+    return sum(h.weight_pct * g for h, g in zip(covered, clipped)) / weight_sum
+
+
+def build_etf_valuation_snapshot(
+    ticker: str,
+    etf_info: dict,
+    top_holdings: list[dict],
+    holding_fundamentals: dict[str, dict],
+    technicals: dict,
+    hist_pe: Optional[float],
+    hist_pe_error: Optional[str],
+) -> ETFValuationSnapshot:
+    """Build an ETFValuationSnapshot: concentration, PEGY, fair value, 5Y projection, entry tiers.
+
+    Never raises — every field defaults to None on missing inputs.
+    """
+    technicals = technicals or {}
+    etf_info = etf_info or {}
+    current_price = technicals.get("current_price")
+
+    # ── Section 1: Top holdings + concentration ──
+    holdings: list[ETFHolding] = []
+    for h in (top_holdings or [])[:10]:
+        symbol = str(h.get("symbol", "")).upper()
+        fundamentals = holding_fundamentals.get(symbol, {}) if holding_fundamentals else {}
+        holdings.append(
+            ETFHolding(
+                symbol=symbol,
+                name=h.get("holdingName", ""),
+                weight_pct=float(h.get("holdingPercent", 0) or 0) * 100,  # yfinance returns a decimal fraction
+                trailing_pe=fundamentals.get("trailing_pe"),
+                forward_pe=fundamentals.get("forward_pe"),
+                earnings_growth=fundamentals.get("earnings_growth"),
+            )
+        )
+    concentration_pct = sum(h.weight_pct for h in holdings) if holdings else None
+
+    # ── Section 2: Basket PE + forward growth + PEGY ──
+    weighted_pe, coverage_note = _weighted_harmonic_pe(holdings)
+    trailing_pe = etf_info.get("trailing_pe") or weighted_pe
+    trailing_pe_source = "etf_info" if etf_info.get("trailing_pe") else "weighted_holdings"
+
+    weighted_growth = _weighted_forward_growth(holdings)
+    forward_eps_growth_pct = weighted_growth * 100 if weighted_growth is not None else None
+
+    trailing_dividend_yield = etf_info.get("trailing_dividend_yield")  # true fraction, per data.fetch_etf_info
+    distribution_yield_pct = trailing_dividend_yield * 100 if trailing_dividend_yield is not None else None
+
+    pegy_ratio = calculate_pegy(trailing_pe, forward_eps_growth_pct, distribution_yield_pct)
+    pegy_label, pegy_color = pegy_status(pegy_ratio)
+
+    # ── Section 3: Historical avg PE (FMP or proxy) + fair value + entry tiers ──
+    if hist_pe is not None:
+        hist_5y_avg_pe = hist_pe
+        hist_pe_note = "FMP 5-year average"
+    else:
+        avg_price_5y = technicals.get("avg_price_5y")
+        if avg_price_5y is not None and trailing_pe and current_price:
+            hist_5y_avg_pe = avg_price_5y * (trailing_pe / current_price)
+            hist_pe_note = f"Proxy: mean(5y price) × (current PE / current price) — FMP unavailable ({hist_pe_error})"
+        else:
+            hist_5y_avg_pe = None
+            hist_pe_note = f"Unavailable — FMP unavailable ({hist_pe_error}) and insufficient price/PE data for proxy"
+
+    fair_value = calculate_fair_value(current_price, hist_5y_avg_pe, trailing_pe)
+    margin_of_safety_pct = calculate_margin_of_safety(fair_value, current_price)
+
+    ema_50 = technicals.get("ema_50")
+    sma_200 = technicals.get("sma_200")
+
+    if ema_50 is not None and current_price is not None:
+        tier1_entry = min(ema_50, current_price * 0.95)
+    elif current_price is not None:
+        tier1_entry = current_price * 0.95
+    else:
+        tier1_entry = None
+
+    if fair_value is not None and sma_200 is not None:
+        tier2_entry = min(fair_value, sma_200)
+    elif fair_value is not None:
+        tier2_entry = fair_value
+    elif sma_200 is not None:
+        tier2_entry = sma_200
+    else:
+        tier2_entry = None
+
+    # ── Section 4: 5-year projection ──
+    if forward_eps_growth_pct is not None and forward_eps_growth_pct > 0:
+        growth_rate_used = min(forward_eps_growth_pct / 100, 0.15)
+    else:
+        growth_rate_used = 0.06
+
+    current_eps = current_price / trailing_pe if current_price and trailing_pe else None
+    projected_eps_5y, projected_price_5y, total_return_pct, cagr_pct = calculate_5y_projection(
+        current_eps, growth_rate_used, hist_5y_avg_pe, current_price
+    )
+
+    # ── Section 5: Rating ──
+    rating, rating_color = determine_etf_rating(pegy_ratio, margin_of_safety_pct)
+
+    return ETFValuationSnapshot(
+        ticker=ticker,
+        long_name=etf_info.get("long_name"),
+        fund_family=etf_info.get("fund_family"),
+        category=etf_info.get("category"),
+        current_price=current_price,
+        total_assets=etf_info.get("total_assets"),
+        expense_ratio=etf_info.get("expense_ratio"),
+        distribution_yield_pct=distribution_yield_pct,
+        holdings=holdings,
+        concentration_pct=concentration_pct,
+        holdings_pe_coverage_note=coverage_note,
+        trailing_pe=trailing_pe,
+        trailing_pe_source=trailing_pe_source,
+        forward_eps_growth_pct=forward_eps_growth_pct,
+        pegy_ratio=pegy_ratio,
+        pegy_label=pegy_label,
+        pegy_color=pegy_color,
+        hist_5y_avg_pe=hist_5y_avg_pe,
+        hist_pe_note=hist_pe_note,
+        fair_value=fair_value,
+        ema_50=ema_50,
+        sma_200=sma_200,
+        week_52_high=technicals.get("week_52_high"),
+        week_52_low=technicals.get("week_52_low"),
+        tier1_entry=tier1_entry,
+        tier2_entry=tier2_entry,
+        growth_rate_used=growth_rate_used,
+        projected_eps_5y=projected_eps_5y,
+        projected_price_5y=projected_price_5y,
+        total_return_pct=total_return_pct,
+        cagr_pct=cagr_pct,
+        margin_of_safety_pct=margin_of_safety_pct,
+        rating=rating,
+        rating_color=rating_color,
     )
 
 

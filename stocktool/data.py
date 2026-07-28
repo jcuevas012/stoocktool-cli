@@ -119,6 +119,44 @@ def fetch_balance_sheets(tickers: list[str]) -> dict[str, dict]:
     return results
 
 
+def fetch_cashflow_basics(tickers: list[str]) -> dict[str, dict]:
+    """Fetch latest-year depreciation and capex from cashflow statement for DCF valuation."""
+    results: dict[str, dict] = {}
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        out: dict = {}
+        try:
+            t = yf.Ticker(ticker)
+            cf = t.cashflow
+            if cf is None or cf.empty:
+                return ticker, out
+            col = cf.columns[0]  # most recent year
+
+            def _get(*keys):
+                for key in keys:
+                    if key in cf.index and pd.notna(cf.loc[key, col]):
+                        return float(cf.loc[key, col])
+                return None
+
+            dep = _get("Depreciation Amortization Depletion", "Depreciation And Amortization")
+            capex = _get("Capital Expenditure")
+            if dep is not None:
+                out["depreciation"] = dep
+            if capex is not None:
+                out["capex"] = capex  # negative in yfinance
+        except Exception:
+            pass
+        return ticker, out
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, out = future.result()
+            results[ticker] = out
+
+    return results
+
+
 def fetch_revenue_estimates(tickers: list[str]) -> dict[str, float | None]:
     """Fetch next-year analyst revenue estimates for each ticker in parallel."""
     results: dict[str, float | None] = {}
@@ -204,14 +242,36 @@ def fetch_etf_info(tickers: list[str]) -> dict[str, dict]:
         try:
             t = yf.Ticker(ticker)
             info = t.info if isinstance(t.info, dict) else {}
+
+            # annualReportExpenseRatio is no longer populated by yfinance for most
+            # ETFs; netExpenseRatio is the current field but returned as a
+            # "decimal percentage" (0.03 = 0.03%) rather than a fraction — normalize
+            # to a true fraction so this stays consistent with the old field's unit.
+            net_er = _safe_float(info.get("netExpenseRatio"))
+            expense_ratio = net_er / 100 if net_er is not None else _safe_float(info.get("annualReportExpenseRatio"))
+
+            # trailingAnnualDividendYield is similarly stale; dividendYield (also a
+            # "decimal percentage") and yield (a true fraction) are the working
+            # fallbacks — normalize both to a true fraction.
+            div_yield = _safe_float(info.get("dividendYield"))
+            if div_yield is not None:
+                trailing_dividend_yield = div_yield / 100
+            else:
+                trailing_dividend_yield = _safe_float(info.get("yield"))
+                if trailing_dividend_yield is None:
+                    trailing_dividend_yield = _safe_float(info.get("trailingAnnualDividendYield"))
+
             return ticker, {
-                "expense_ratio": _safe_float(info.get("annualReportExpenseRatio")),
+                "expense_ratio": expense_ratio,
                 "total_assets": _safe_float(info.get("totalAssets")),
                 "holdings": info.get("holdings", []),
                 "sector_weightings": info.get("sectorWeightings", []),
-                "trailing_dividend_yield": _safe_float(info.get("trailingAnnualDividendYield")),
+                "trailing_dividend_yield": trailing_dividend_yield,
                 "fund_family": info.get("fundFamily"),
                 "long_name": info.get("longName"),
+                "trailing_pe": _safe_float(info.get("trailingPE")),
+                "forward_pe": _safe_float(info.get("forwardPE")),
+                "category": info.get("category"),
             }
         except Exception:
             return ticker, {}
@@ -311,6 +371,91 @@ def fetch_portfolio_etf_holdings(
         for future in as_completed(futures):
             ticker, holdings = future.result()
             results[ticker] = holdings
+
+    return results
+
+
+def fetch_holding_fundamentals(symbols: list[str]) -> dict[str, dict]:
+    """Fetch trailing/forward PE and earnings growth for ETF top-holding stocks.
+
+    Used to build a weighted basket PE/growth for ETF valuation when the ETF's
+    own .info doesn't populate trailingPE/forwardPE directly.
+    Returns {symbol: {"trailing_pe": float|None, "forward_pe": float|None,
+                       "earnings_growth": float|None}}
+    """
+    results: dict[str, dict] = {}
+    if not symbols:
+        return results
+
+    def _fetch_one(symbol: str) -> tuple[str, dict]:
+        try:
+            info = yf.Ticker(symbol).info
+            info = info if isinstance(info, dict) else {}
+            return symbol, {
+                "trailing_pe": _safe_float(info.get("trailingPE")),
+                "forward_pe": _safe_float(info.get("forwardPE")),
+                "earnings_growth": _safe_float(info.get("earningsGrowth")),
+            }
+        except Exception:
+            return symbol, {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, s): s for s in symbols}
+        for future in as_completed(futures):
+            symbol, info = future.result()
+            results[symbol] = info
+
+    return results
+
+
+def fetch_etf_technicals(tickers: list[str]) -> dict[str, dict]:
+    """Compute EMA-50, SMA-200, 52-week high/low, and 5-year average price.
+
+    Single yf.download(period="5y") call per batch, reused both for the
+    technicals (tail of the series) and for the 5y-average-price proxy used
+    as a fallback for historical average P/E when FMP is unavailable.
+
+    Returns {ticker: {"current_price": float|None, "ema_50": float|None,
+                       "sma_200": float|None, "week_52_high": float|None,
+                       "week_52_low": float|None, "avg_price_5y": float|None}}
+    """
+    results: dict[str, dict] = {}
+    if not tickers:
+        return results
+
+    df = yf.download(
+        tickers=" ".join(tickers),
+        period="5y",
+        group_by="ticker",
+        auto_adjust=True,
+        progress=False,
+        threads=True,
+    )
+    if not isinstance(df.columns, pd.MultiIndex) and len(tickers) == 1:
+        ticker = tickers[0]
+        df.columns = pd.MultiIndex.from_tuples(
+            [(ticker, col) for col in df.columns], names=["ticker", "price"]
+        )
+
+    for ticker in tickers:
+        try:
+            close = df[(ticker, "Close")].dropna()
+            if close.empty:
+                continue
+            current_price = float(close.iloc[-1])
+            ema_50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1]) if len(close) >= 50 else None
+            sma_200 = float(close.rolling(window=200).mean().iloc[-1]) if len(close) >= 200 else None
+            recent = close.tail(252)
+            results[ticker] = {
+                "current_price": current_price,
+                "ema_50": ema_50,
+                "sma_200": sma_200,
+                "week_52_high": float(recent.max()),
+                "week_52_low": float(recent.min()),
+                "avg_price_5y": float(close.mean()),
+            }
+        except (KeyError, TypeError, IndexError):
+            continue
 
     return results
 

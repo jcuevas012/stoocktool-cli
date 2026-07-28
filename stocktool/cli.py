@@ -97,6 +97,7 @@ def valuation(
         history_6m = data.fetch_price_history(tickers, horizon_days=180)
         revenue_estimates = data.fetch_revenue_estimates(tickers)
         balance_sheets = data.fetch_balance_sheets(tickers)
+        cashflow_basics = data.fetch_cashflow_basics(tickers)
 
     snapshots = [
         analysis.build_valuation_snapshot(
@@ -105,6 +106,7 @@ def valuation(
             history_6m,
             revenue_estimates.get(t),
             balance_sheets.get(t, {}),
+            cashflow_basics.get(t, {}),
         )
         for t in tickers
     ]
@@ -482,6 +484,44 @@ def etf_compare(
 
 
 # ---------------------------------------------------------------------------
+# stocktool etf valuation
+# ---------------------------------------------------------------------------
+
+@etf_app.command("valuation")
+def etf_valuation(
+    tickers: list[str] = typer.Argument(..., help="One or more ETF ticker symbols."),
+    html: bool = typer.Option(False, "--html", is_flag=True, help="Export a self-contained HTML report to the default path."),
+    html_path: Optional[str] = typer.Option(None, "--html-path", help="Custom path for the HTML report (implies --html)."),
+) -> None:
+    """ETF valuation: concentration, PEGY, historical valuation bands, 5Y projection, entry strategy."""
+    from . import data, analysis, display, fmp
+
+    tickers = [t.upper() for t in tickers]
+    with console.status(f"Fetching ETF valuation data for {', '.join(tickers)}..."):
+        etf_info = data.fetch_etf_info(tickers)
+        top_holdings = data.fetch_portfolio_etf_holdings(tickers)
+        all_symbols = sorted({h["symbol"] for t in tickers for h in top_holdings.get(t, [])})
+        holding_fundamentals = data.fetch_holding_fundamentals(all_symbols)
+        technicals = data.fetch_etf_technicals(tickers)
+        hist_pe_results = {t: fmp.fetch_historical_pe(t) for t in tickers}
+
+    snapshots = [
+        analysis.build_etf_valuation_snapshot(
+            t, etf_info.get(t, {}), top_holdings.get(t, []),
+            holding_fundamentals, technicals.get(t, {}),
+            hist_pe_results[t][0], hist_pe_results[t][1],
+        )
+        for t in tickers
+    ]
+    display.render_etf_valuation(snapshots)
+
+    if html or html_path:
+        from .html_report import generate_html_report
+        out = generate_html_report(snapshots, output_path=html_path or None)
+        console.print(f"[green]HTML report saved:[/green] {out}")
+
+
+# ---------------------------------------------------------------------------
 # stocktool strategy dip
 # ---------------------------------------------------------------------------
 
@@ -771,6 +811,7 @@ def docs() -> None:
         ("portfolio overlap",             "Direct + ETF indirect exposure overlap",           ""),
         ("portfolio migrate",             "Copy local JSON → Google Sheets",                  ""),
         ("etf compare VOO QQQM SPY",      "Side-by-side ETF overview + holdings + sectors",  ""),
+        ("etf valuation VOO QQQM",        "PEGY, valuation bands, 5Y projection, entry tiers", "--html"),
         ("strategy dip",                  "VIX fear gauge + margin deployment signal",        "--sma-days 200"),
         ("strategy puts",                 "Cash-secured put screener (Buffett style)",        "--min-dte 30  --max-dte 45  --otm 5.0"),
         ("strategy margin [AMOUNT]",      "Track / update margin in use",                     "--reset"),

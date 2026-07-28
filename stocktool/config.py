@@ -35,6 +35,11 @@ CREDENTIALS_FILE = Path(
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "")
 ENV_FILE = _env_path
 
+# Financial Modeling Prep (optional) — supplies true 5-year historical average P/E
+# for ETF valuation; the feature falls back to a yfinance-only proxy without a key.
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "")
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
+
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,3 +48,8 @@ def ensure_config_dir() -> None:
 def sheets_configured() -> bool:
     """Return True if Google Sheets credentials exist on disk."""
     return CREDENTIALS_FILE.exists()
+
+
+def fmp_configured() -> bool:
+    """Return True if an FMP API key is set."""
+    return bool(FMP_API_KEY)

@@ -9,7 +9,7 @@ from rich.text import Text
 
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
-    CashSecuredPutSnapshot, OwnerEarningsSnapshot,
+    CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
     score_ticker, pe_category, cash_debt_rating,
 )
 from .portfolio import PortfolioSnapshot
@@ -442,6 +442,16 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         ("  Quick Ratio:    ", "bold"), (qr_str, qr_color),
         ("   — like current ratio but excludes inventory. >1.0 = solid", "dim"),
     ))
+
+    # Free Cash Flow (used in DCF fallback)
+    if snap.free_cashflow is not None:
+        fcf_s = _fmt_large(snap.free_cashflow)
+        fcf_color = "green" if snap.free_cashflow > 0 else "red"
+        lines.append(Text(""))
+        lines.append(Text.assemble(
+            ("  Free Cash Flow: ", "bold"), (fcf_s, fcf_color),
+            ("   — operating cash minus capex. Used as DCF fallback if D&A unavailable.", "dim"),
+        ))
     lines.append(Text(""))
 
     # ── 3. Revenue Estimate Next Year ────────────────────────────────────
@@ -452,17 +462,58 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
     lines.append(Text.assemble(("  Analyst Avg Revenue: ", "bold"), (rev_str, "white")))
     lines.append(Text(""))
 
-    # ── 4. Profit Margin ─────────────────────────────────────────────────
-    lines.append(Rule(" 4. Profit Margin ", style="cyan"))
-    hint("Of every $1 in sales, how much becomes profit. High margins = pricing power and competitive moat.")
+    # ── 4. Profitability & Growth ─────────────────────────────────────────
+    lines.append(Rule(" 4. Profitability & Growth ", style="cyan"))
+    hint("Core earnings quality metrics. Margin = pricing power. EPS/Revenue growth = compounding engine. ROE = capital efficiency.")
     margin_str = f"{snap.profit_margin:.2%}" if snap.profit_margin else "N/A"
     margin_color = "green" if (snap.profit_margin or 0) > 0.20 else ("yellow" if (snap.profit_margin or 0) > 0.05 else "red")
     margin_label = "STRONG" if (snap.profit_margin or 0) > 0.20 else ("MODERATE" if (snap.profit_margin or 0) > 0.05 else "THIN")
     lines.append(Text(""))
     lines.append(Text.assemble(
-        ("  Profit Margin: ", "bold"), (margin_str, margin_color),
+        ("  Profit Margin:    ", "bold"), (margin_str, margin_color),
         (f"   [{margin_label}]", margin_color),
+        ("   — net income / revenue", "dim"),
     ))
+
+    # EPS
+    eps_str = f"${snap.eps:.2f}" if snap.eps is not None else "N/A"
+    eps_color = "green" if (snap.eps or 0) > 0 else "red"
+    lines.append(Text.assemble(
+        ("  EPS (Trailing):   ", "bold"), (eps_str, eps_color),
+        ("   — per-share profit over last 12 months", "dim"),
+    ))
+
+    # ROE
+    if snap.roe is not None:
+        roe_color = "green" if snap.roe > 0.20 else ("yellow" if snap.roe > 0.10 else "red")
+        roe_label = "EXCELLENT" if snap.roe > 0.20 else ("DECENT" if snap.roe > 0.10 else "POOR")
+        lines.append(Text.assemble(
+            ("  Return on Equity: ", "bold"), (f"{snap.roe:.1%}", roe_color),
+            (f"   [{roe_label}]", roe_color),
+            ("   — net income / shareholders' equity", "dim"),
+        ))
+    else:
+        lines.append(Text("  Return on Equity: N/A", style="dim"))
+
+    # Revenue & EPS growth (trailing, used in DCF)
+    lines.append(Text(""))
+    lines.append(Text("  Growth Rates (trailing, used in DCF growth-rate selection):", style="bold"))
+    if snap.revenue_growth is not None:
+        rg_color = "green" if snap.revenue_growth > 0.15 else ("yellow" if snap.revenue_growth > 0 else "red")
+        lines.append(Text.assemble(
+            ("  Revenue Growth:   ", "bold"), (f"{snap.revenue_growth:+.1%}", rg_color),
+        ))
+    else:
+        lines.append(Text("  Revenue Growth:   N/A", style="dim"))
+
+    if snap.eps_growth is not None:
+        eg_color = "green" if snap.eps_growth > 0.15 else ("yellow" if snap.eps_growth > 0 else "red")
+        lines.append(Text.assemble(
+            ("  EPS Growth:       ", "bold"), (f"{snap.eps_growth:+.1%}", eg_color),
+        ))
+    else:
+        lines.append(Text("  EPS Growth:       N/A", style="dim"))
+
     lines.append(Text(""))
 
     # ── 5. Avg PE (6 months) ─────────────────────────────────────────────
@@ -564,12 +615,322 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
     else:
         lines.append(Text("  Possible Return: N/A — need revenue estimate to project", style="dim"))
 
+    # ── Intrinsic Value (DCF) ─────────────────────────────────────────────
+    lines.append(Text(""))
+    lines.append(Rule(" 7. Intrinsic Value — DCF (Buffett Owner Earnings Method) ", style="bold magenta"))
+    hint("10-year discounted cash flow using Owner Earnings. Estimates fair value per share independent of market price.")
+    lines.append(Text(""))
+
+    if snap.dcf_owner_earnings is not None:
+        ni_s = _fmt_large(snap.dcf_net_income) if snap.dcf_net_income else "N/A"
+        oe_s = _fmt_large(snap.dcf_owner_earnings)
+        lines.append(Text.assemble(("  Step 1  Normalized Net Income: ", "bold"), (ni_s, "white")))
+
+        lines.append(Text.assemble(
+            ("  Step 2  Owner Earnings:        ", "bold"), (oe_s, "cyan"),
+            ("   (NI + D&A − CapEx)", "dim"),
+        ))
+        if snap.depreciation is not None:
+            dep_s = _fmt_large(snap.depreciation)
+            lines.append(Text(f"            D&A (add back):  {dep_s}", style="dim"))
+        if snap.capex_cf is not None:
+            capex_s = _fmt_large(abs(snap.capex_cf))
+            lines.append(Text(f"            CapEx (subtract): {capex_s}", style="dim"))
+        if snap.dcf_owner_earnings_note:
+            lines.append(Text(f"          ↳ {snap.dcf_owner_earnings_note}", style="dim italic"))
+        lines.append(Text(""))
+
+        growth_s = f"{snap.dcf_growth_rate:.1%}" if snap.dcf_growth_rate is not None else "N/A"
+        lines.append(Text.assemble(
+            ("  Step 3  Growth Rate:           ", "bold"), (growth_s, "yellow"),
+        ))
+        if snap.dcf_growth_note:
+            lines.append(Text(f"          ↳ {snap.dcf_growth_note}", style="dim italic"))
+        lines.append(Text.assemble(
+            ("  Step 4  Discount Rate:         ", "bold"),
+            (f"{snap.dcf_discount_rate:.0%}", "white"),
+            ("   (required annual return)", "dim"),
+        ))
+        lines.append(Text.assemble(
+            ("  Step 5  Terminal Growth:       ", "bold"),
+            (f"{snap.dcf_terminal_growth:.1%}", "white"),
+            ("   (perpetual growth after year 10)", "dim"),
+        ))
+        lines.append(Text(""))
+
+        ev_s = _fmt_large(snap.dcf_enterprise_value) if snap.dcf_enterprise_value else "N/A"
+        eq_s = _fmt_large(snap.dcf_equity_value) if snap.dcf_equity_value else "N/A"
+        lines.append(Text.assemble(("  Step 6  Enterprise Value:      ", "bold"), (ev_s, "white")))
+        lines.append(Text.assemble(
+            ("  Step 7  Equity Value:          ", "bold"), (eq_s, "white"),
+            ("   (+ cash − debt)", "dim"),
+        ))
+
+        if snap.intrinsic_value_per_share is not None:
+            iv_s = f"${snap.intrinsic_value_per_share:.2f}"
+            price_s = f"${snap.current_price:.2f}" if snap.current_price else "N/A"
+            lines.append(Text(""))
+            lines.append(Text.assemble(
+                ("  Step 8  Intrinsic Value/Share: ", "bold"), (iv_s, "bold cyan"),
+                ("   vs Current ", "dim"), (price_s, "white"),
+            ))
+
+        if snap.margin_of_safety_pct is not None:
+            mos = snap.margin_of_safety_pct
+            mos_color = "bold green" if mos > 25 else ("bold yellow" if mos > 5 else "bold red")
+            sign = "+" if mos >= 0 else ""
+            rating_color = snap.iv_rating_color or "white"
+            lines.append(Text.assemble(
+                ("  Step 9  Margin of Safety:     ", "bold"),
+                (f"{sign}{mos:.1f}%", mos_color),
+            ))
+            lines.append(Text(""))
+            lines.append(Text.assemble(
+                ("  Step 10 Rating:               ", "bold"),
+                (snap.iv_rating or "N/A", f"bold {rating_color}"),
+            ))
+        else:
+            lines.append(Text("  Steps 8-10: N/A — need shares outstanding for per-share value", style="dim"))
+    else:
+        lines.append(Text("  DCF not available — insufficient data (need revenue estimate + profit margin or FCF > 0)", style="dim"))
+
     console.print(Panel(
         Group(*lines),
         title=f"[bold cyan]Valuación de Activos: {snap.ticker}[/bold cyan]",
         border_style="cyan",
         padding=(0, 1),
     ))
+
+
+def render_etf_valuation(snapshots: list[ETFValuationSnapshot]) -> None:
+    """Render the ETF valuation template for each ticker as a rich Panel."""
+    for snap in snapshots:
+        _render_one_etf_valuation(snap)
+    if len(snapshots) >= 2:
+        _render_etf_valuation_comparison(snapshots)
+
+
+def _render_one_etf_valuation(snap: ETFValuationSnapshot) -> None:
+    from rich.console import Group
+    from rich.rule import Rule
+
+    lines: list = []
+
+    def hint(text: str) -> None:
+        lines.append(Text(f"  ↳ {text}", style="dim italic"))
+
+    # ── Header ───────────────────────────────────────────────────────────
+    price_str = f"${snap.current_price:.2f}" if snap.current_price else "N/A"
+    aum_str = _fmt_large(snap.total_assets) if snap.total_assets else "N/A"
+    er_str = f"{snap.expense_ratio:.2%}" if snap.expense_ratio is not None else "N/A"
+    lines.append(Text.assemble(
+        ("  Price: ", "bold"), (price_str, "cyan"),
+        ("   AUM: ", "bold"), (aum_str, "cyan"),
+        ("   Expense Ratio: ", "bold"), (er_str, ""),
+        ("   Category: ", "bold"), (snap.category or "Unknown", ""),
+    ))
+    lines.append(Text(""))
+
+    # ── 1. Basket Concentration & Top Holdings ──────────────────────────
+    lines.append(Rule(" 1. Basket Concentration & Top Holdings ", style="cyan"))
+    hint("A fund concentrated in a handful of names behaves more like those stocks than a diversified basket.")
+    lines.append(Text(""))
+
+    if snap.holdings:
+        h_table = Table(show_lines=False, header_style="bold cyan", box=None, padding=(0, 1))
+        h_table.add_column("Symbol", style="bold")
+        h_table.add_column("Name")
+        h_table.add_column("Weight", justify="right")
+        h_table.add_column("Trailing PE", justify="right")
+        for h in snap.holdings:
+            pe_str = f"{h.trailing_pe:.1f}x" if h.trailing_pe else "N/A"
+            h_table.add_row(h.symbol, h.name or "N/A", f"{h.weight_pct:.2f}%", pe_str)
+        lines.append(h_table)
+        lines.append(Text(""))
+
+    if snap.concentration_pct is not None:
+        conc = snap.concentration_pct
+        conc_color = "green" if conc < 40 else ("yellow" if conc < 60 else "red")
+        conc_label = "DIVERSIFIED" if conc < 40 else ("MODERATE" if conc < 60 else "CONCENTRATED")
+        lines.append(Text.assemble(
+            ("  Top 10 Weight: ", "bold"), (f"{conc:.1f}%", conc_color),
+            (f"   [{conc_label}]", conc_color),
+        ))
+    else:
+        lines.append(Text("  Top 10 Weight: N/A", style="dim"))
+    lines.append(Text(""))
+
+    # ── 2. Valuation Multiples & PEGY ────────────────────────────────────
+    lines.append(Rule(" 2. Valuation Multiples & PEGY ", style="cyan"))
+    hint("PEGY adjusts P/E for growth AND yield — a fund can look expensive on P/E alone but cheap once growth and dividends are priced in.")
+    lines.append(Text(""))
+
+    pe_str = f"{snap.trailing_pe:.1f}x" if snap.trailing_pe else "N/A"
+    source_note = "(basket .info)" if snap.trailing_pe_source == "etf_info" else "(weighted top-10 holdings)"
+    lines.append(Text.assemble(
+        ("  Trailing PE:        ", "bold"), (pe_str, "white"),
+        (f"   {source_note}", "dim"),
+    ))
+    if snap.holdings_pe_coverage_note:
+        hint(snap.holdings_pe_coverage_note)
+
+    growth_str = f"{snap.forward_eps_growth_pct:+.1f}%" if snap.forward_eps_growth_pct is not None else "N/A"
+    growth_color = "green" if (snap.forward_eps_growth_pct or 0) > 10 else ("yellow" if (snap.forward_eps_growth_pct or 0) > 0 else "red")
+    lines.append(Text.assemble(
+        ("  Forward EPS Growth: ", "bold"), (growth_str, growth_color),
+        ("   — weighted across top-10 holdings", "dim"),
+    ))
+
+    yield_str = f"{snap.distribution_yield_pct:.2f}%" if snap.distribution_yield_pct is not None else "N/A"
+    lines.append(Text.assemble(
+        ("  Distribution Yield: ", "bold"), (yield_str, "white"),
+    ))
+
+    pegy_str = f"{snap.pegy_ratio:.2f}x" if snap.pegy_ratio is not None else "N/A"
+    lines.append(Text.assemble(
+        ("  PEGY Ratio:         ", "bold"), (pegy_str, snap.pegy_color or "dim"),
+        (f"   [{snap.pegy_label or 'N/A'}]", snap.pegy_color or "dim"),
+    ))
+    lines.append(Text(""))
+
+    # ── 3. Historical Valuation Bands & NAV ──────────────────────────────
+    lines.append(Rule(" 3. Historical Valuation Bands & NAV ", style="cyan"))
+    hint("Fair value assumes the fund's P/E reverts to its historical average — a reference point, not a guarantee.")
+    lines.append(Text(""))
+
+    hist_pe_str = f"{snap.hist_5y_avg_pe:.1f}x" if snap.hist_5y_avg_pe else "N/A"
+    lines.append(Text.assemble(("  5Y Avg PE:    ", "bold"), (hist_pe_str, "yellow")))
+    if snap.hist_pe_note:
+        hint(snap.hist_pe_note)
+
+    fv_str = f"${snap.fair_value:.2f}" if snap.fair_value else "N/A"
+    lines.append(Text.assemble(("  Fair Value:   ", "bold"), (fv_str, "cyan")))
+
+    if snap.tier1_entry is not None and snap.tier2_entry is not None:
+        lo, hi = sorted([snap.tier1_entry, snap.tier2_entry])
+        entry_str = f"${lo:.2f} – ${hi:.2f}"
+    elif snap.tier1_entry is not None:
+        entry_str = f"${snap.tier1_entry:.2f} (Tier 2 unavailable)"
+    elif snap.tier2_entry is not None:
+        entry_str = f"${snap.tier2_entry:.2f} (Tier 1 unavailable)"
+    else:
+        entry_str = "N/A"
+    lines.append(Text.assemble(("  Entry Zone:   ", "bold"), (entry_str, "green")))
+    lines.append(Text(""))
+
+    # ── 4. Valuation Projection (5-Year Growth View) ─────────────────────
+    lines.append(Rule(" 4. Valuation Projection (5-Year Growth View) ", style="bold magenta"))
+    hint("Conservative estimate of future value. For long-term holds, look for 50%+ upside potential.")
+    lines.append(Text(""))
+
+    growth_used_str = f"{snap.growth_rate_used:.1%}" if snap.growth_rate_used is not None else "N/A"
+    lines.append(Text.assemble(("  Growth Rate Used:    ", "bold"), (growth_used_str, "yellow")))
+
+    proj_price_str = f"${snap.projected_price_5y:.2f}" if snap.projected_price_5y else "N/A"
+    lines.append(Text.assemble(("  Projected Price (5Y): ", "bold"), (proj_price_str, "white")))
+
+    if snap.total_return_pct is not None:
+        ret_color = "bold green" if snap.total_return_pct >= 50 else ("bold yellow" if snap.total_return_pct >= 15 else ("green" if snap.total_return_pct >= 0 else "bold red"))
+        cagr_str = f"{snap.cagr_pct:+.1f}%" if snap.cagr_pct is not None else "N/A"
+        lines.append(Text.assemble(
+            ("  5-Year Possible Return: ", "bold"),
+            (f"{snap.total_return_pct:+.1f}%", ret_color),
+            (f" ({cagr_str} CAGR)", "dim"),
+        ))
+    else:
+        lines.append(Text("  5-Year Possible Return: N/A", style="dim"))
+    lines.append(Text(""))
+
+    # ── 5. Entry Strategy & Margin of Safety ─────────────────────────────
+    lines.append(Rule(" 5. Entry Strategy & Margin of Safety ", style="bold magenta"))
+    hint("Margin of safety cushions against being wrong. Entry tiers give a disciplined way to average in.")
+    lines.append(Text(""))
+
+    if snap.margin_of_safety_pct is not None:
+        mos = snap.margin_of_safety_pct
+        mos_color = "bold green" if mos > 25 else ("bold yellow" if mos > 5 else "bold red")
+        sign = "+" if mos >= 0 else ""
+        lines.append(Text.assemble(
+            ("  Margin of Safety:       ", "bold"), (f"{sign}{mos:.1f}%", mos_color),
+        ))
+    else:
+        lines.append(Text("  Margin of Safety: N/A", style="dim"))
+
+    t1_str = f"${snap.tier1_entry:.2f}" if snap.tier1_entry is not None else "N/A"
+    t2_str = f"${snap.tier2_entry:.2f}" if snap.tier2_entry is not None else "N/A"
+    lines.append(Text.assemble(
+        ("  Tier 1 (DCA Pullback):        ", "bold"), (t1_str, "green"),
+        ("   — min(50d EMA, price × 0.95)", "dim"),
+    ))
+    lines.append(Text.assemble(
+        ("  Tier 2 (Valuation Reversion): ", "bold"), (t2_str, "green"),
+        ("   — min(fair value, 200d SMA)", "dim"),
+    ))
+    lines.append(Text(""))
+
+    lines.append(Text.assemble(
+        ("  Rating: ", "bold"),
+        (snap.rating or "N/A", f"bold {snap.rating_color or 'white'}"),
+    ))
+
+    console.print(Panel(
+        Group(*lines),
+        title=f"[bold cyan]Valuación de Activos: {snap.ticker}[/bold cyan]",
+        border_style="cyan",
+        padding=(0, 1),
+    ))
+
+
+def _render_etf_valuation_comparison(snapshots: list[ETFValuationSnapshot]) -> None:
+    """Render a side-by-side comparison table for multiple ETF tickers."""
+    table = Table(
+        title="ETF Valuation — Side by Side",
+        show_lines=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Metric", style="bold", min_width=20)
+    for snap in snapshots:
+        table.add_column(snap.ticker, justify="right", min_width=12)
+    table.add_column("What it means", style="dim italic", min_width=30)
+
+    cells: list = ["PEGY Ratio"]
+    for snap in snapshots:
+        if snap.pegy_ratio is not None:
+            cells.append(Text(f"{snap.pegy_ratio:.2f}x", style=snap.pegy_color or "dim"))
+        else:
+            cells.append(Text("N/A", style="dim"))
+    cells.append("Lower = cheaper relative to growth + yield")
+    table.add_row(*cells)
+
+    cells = ["Margin of Safety"]
+    for snap in snapshots:
+        if snap.margin_of_safety_pct is not None:
+            mos = snap.margin_of_safety_pct
+            color = "green" if mos > 25 else ("yellow" if mos > 5 else "red")
+            cells.append(Text(f"{mos:+.1f}%", style=color))
+        else:
+            cells.append(Text("N/A", style="dim"))
+    cells.append("Cushion between fair value and current price")
+    table.add_row(*cells)
+
+    cells = ["Concentration (Top 10)"]
+    for snap in snapshots:
+        if snap.concentration_pct is not None:
+            conc = snap.concentration_pct
+            color = "green" if conc < 40 else ("yellow" if conc < 60 else "red")
+            cells.append(Text(f"{conc:.1f}%", style=color))
+        else:
+            cells.append(Text("N/A", style="dim"))
+    cells.append("Higher = more concentrated in fewer names")
+    table.add_row(*cells)
+
+    cells = ["Rating"]
+    for snap in snapshots:
+        cells.append(Text(snap.rating or "N/A", style=f"bold {snap.rating_color or 'white'}"))
+    cells.append("Combined PEGY + margin of safety verdict")
+    table.add_row(*cells)
+
+    console.print(table)
 
 
 def render_sma_screen(sma_data: dict[str, dict], sma_days: int = 200) -> None:
