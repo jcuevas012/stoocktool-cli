@@ -251,7 +251,7 @@ yfinance has no field for a true multi-year historical average P/E, which the Fa
 ## Valuation Command (`stocktool valuation`)
 
 Full value-investing analysis template. Designed for 5+ year positions.
-Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimates + balance sheet.
+Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimates + balance sheet + 1-year price history for the 200-day SMA.
 
 **Sections rendered (one panel per ticker):**
 
@@ -262,8 +262,10 @@ Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimate
 | 3 | Revenue Estimate | Next-year analyst avg revenue | `ticker.revenue_estimate['+1y']` |
 | 4 | Profit Margin | Trailing profit margin | `profitMargins` |
 | 5 | Avg PE (6m) | Mean(close prices) / trailing EPS over 6 months | price history + `trailingEps` |
-| 6 | Analyst Price Targets | Low / Mean / High price targets, upside %, analyst count, consensus | `targetLowPrice`, `targetMeanPrice`, `targetHighPrice`, `recommendationKey` |
+| 6 | Analyst Price Targets | Low / Mean / High price targets, upside %, analyst count, consensus, 200-day SMA & % vs price | `targetLowPrice`, `targetMeanPrice`, `targetHighPrice`, `recommendationKey`, `data.fetch_sma_data()` |
 | — | Valuation Projection | Revenue × margin = earnings; earnings × avg PE = future market cap → possible return | computed |
+
+**200-Day SMA in Analyst Price Targets:** reuses `data.fetch_sma_data(tickers, sma_days=200)` (same helper as `portfolio sma` / `strategy dip`) — one extra `yf.download(period="1y")` call per `valuation` invocation. Stored on `ValuationSnapshot` as `sma_200` (price) and `pct_from_sma_200` (`(current_price / sma_200 - 1) * 100`). Green when price ≥ SMA (long-term uptrend), red when below (potential value entry, same convention as `portfolio sma`'s BELOW SMA flag). Rendered in both the Rich panel (`display.py`) and the HTML report's Analyst Price Targets card (`html_report.py`); omitted entirely when yfinance doesn't return enough history (< 200 daily bars).
 
 **Projection formula:**
 

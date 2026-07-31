@@ -564,6 +564,17 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         ))
     else:
         lines.append(Text("  No analyst price targets available.", style="dim"))
+
+    if snap.sma_200:
+        sma_str = f"${snap.sma_200:.2f}"
+        pct_str = (
+            f"{snap.pct_from_sma_200:+.1f}%" if snap.pct_from_sma_200 is not None else "N/A"
+        )
+        pct_color = "green" if (snap.pct_from_sma_200 or 0) >= 0 else "red"
+        lines.append(Text.assemble(
+            ("  200-Day SMA:     ", "bold"), (sma_str, "cyan"),
+            ("   → Price vs SMA: ", "dim"), (pct_str, pct_color),
+        ))
     lines.append(Text(""))
 
     # ── Valuation Projection ─────────────────────────────────────────────

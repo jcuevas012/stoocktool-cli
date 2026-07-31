@@ -145,6 +145,7 @@ _TIPS = {
     "analyst_upside":   "% gap from current price to analyst mean target.\n\n✅ > 20% — meaningful consensus upside\n🟡 5–20% — modest\n🔴 Negative — priced above analyst targets",
     "consensus":        "Aggregated analyst recommendation across all covering analysts.\n\nStrong Buy / Buy — bullish majority\nHold — neutral, neither buy nor sell\nSell / Strong Sell — bearish, proceed with caution",
     "num_analysts":     "Number of analysts publishing price targets for this stock.\nMore analysts = more reliable consensus signal.\n\n✅ > 15 — good coverage\n🟡 5–15 — moderate\n🔴 < 5 — thin coverage, treat targets cautiously",
+    "sma_200":          "200-day simple moving average price — a long-term trend reference.\n\n✅ Price above SMA — long-term uptrend\n🔴 Price below SMA — long-term downtrend, potential value entry point",
     "possible_return":  "Projected return if the company reaches its estimated future market cap.\nFormula: (Revenue Est × Margin × Avg PE) ÷ Current Market Cap − 1\n\n✅ > 50% — strong long-term value opportunity\n🟡 15–50% — moderate upside\n⚪ 0–15% — limited upside at current price\n🔴 Negative — projected downside",
     # ── DCF card ────────────────────────────────────────────────────────────
     "dcf_ni":           "Normalized Net Income = Next-Year Revenue Estimate × Profit Margin.\nThe starting annual profit used to seed the DCF model.\nMore forward-looking than reported trailing net income.",
@@ -896,6 +897,12 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
     da_html = f'<span style="color:{da_css}">{da_pct:.1f}%</span> <span class="badge" style="color:{da_css}">{da_label}</span>' if da_pct is not None else '<span class="na">N/A</span>'
     margin_html = f'<span style="color:{margin_css}">{snap.profit_margin:.2%}</span>&nbsp;<span class="badge" style="color:{margin_css}">{margin_label}</span>' if snap.profit_margin is not None else '<span class="na">N/A</span>'
     upside_html = f'<span style="color:{upside_css}">{("+" if (snap.analyst_upside_pct or 0) >= 0 else "")}{snap.analyst_upside_pct:.1f}%</span>' if snap.analyst_upside_pct is not None else '<span class="na">N/A</span>'
+    sma_css = "var(--clr-green)" if (snap.pct_from_sma_200 or 0) >= 0 else "var(--clr-red)"
+    sma_html = (
+        f'${snap.sma_200:.2f} <span style="color:{sma_css}; font-size:.78rem">({"+" if (snap.pct_from_sma_200 or 0) >= 0 else ""}{snap.pct_from_sma_200:.1f}%)</span>'
+        if snap.sma_200 is not None and snap.pct_from_sma_200 is not None
+        else '<span class="na">N/A</span>'
+    )
 
     return f"""
 <div class="card-grid wide">
@@ -936,6 +943,7 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
     {_tr("Upside",       upside_html,                                                                                                                                    _TIPS["analyst_upside"])}
     {_tr("Consensus",    f'<span style="color:{rec_css}; font-weight:700">{html.escape(rec)}</span>',                                                                   _TIPS["consensus"])}
     {_tr("# Analysts",   str(snap.num_analysts) if snap.num_analysts is not None else '<span class="na">N/A</span>',                                                    _TIPS["num_analysts"])}
+    {_tr("200-Day SMA",  sma_html,                                                                                                                                       _TIPS["sma_200"])}
   </div>
 </div>
 

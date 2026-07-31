@@ -81,6 +81,8 @@ class ValuationSnapshot:
     analyst_upside_pct: Optional[float] = None   # (mean_target / current_price - 1) * 100
     num_analysts: Optional[int] = None
     recommendation_key: Optional[str] = None     # 'buy', 'hold', 'sell', 'strongBuy', etc.
+    sma_200: Optional[float] = None              # 200-day simple moving average price
+    pct_from_sma_200: Optional[float] = None     # (current_price / sma_200 - 1) * 100
     # Projections (existing PE-based)
     next_year_revenue_est: Optional[float] = None
     projected_earnings: Optional[float] = None   # next_year_rev * profit_margin
@@ -209,6 +211,7 @@ def build_valuation_snapshot(
     next_year_revenue: Optional[float],
     bs_data: Optional[dict] = None,
     cf_data: Optional[dict] = None,
+    sma_200: Optional[float] = None,
 ) -> "ValuationSnapshot":
     """Build a ValuationSnapshot with projected future market cap, return, and DCF intrinsic value."""
     bs_data = bs_data or {}
@@ -238,6 +241,10 @@ def build_valuation_snapshot(
     num_analysts_raw = info.get("numberOfAnalystOpinions")
     num_analysts = int(num_analysts_raw) if num_analysts_raw else None
     recommendation_key = info.get("recommendationKey")
+
+    pct_from_sma_200: Optional[float] = None
+    if sma_200 and current_price and sma_200 > 0:
+        pct_from_sma_200 = (current_price / sma_200 - 1) * 100
 
     # 6-month average PE = mean(close prices) / trailing EPS
     avg_pe_6m: Optional[float] = None
@@ -351,6 +358,8 @@ def build_valuation_snapshot(
         analyst_upside_pct=analyst_upside_pct,
         num_analysts=num_analysts,
         recommendation_key=recommendation_key,
+        sma_200=sma_200,
+        pct_from_sma_200=pct_from_sma_200,
         next_year_revenue_est=next_year_revenue,
         projected_earnings=projected_earnings,
         future_market_cap=future_market_cap,
