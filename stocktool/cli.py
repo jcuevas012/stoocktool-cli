@@ -99,6 +99,7 @@ def valuation(
         balance_sheets = data.fetch_balance_sheets(tickers)
         cashflow_basics = data.fetch_cashflow_basics(tickers)
         sma_data = data.fetch_sma_data(tickers, sma_days=200)
+        earnings_history = data.fetch_earnings_history(tickers)
 
     snapshots = [
         analysis.build_valuation_snapshot(
@@ -109,6 +110,7 @@ def valuation(
             balance_sheets.get(t, {}),
             cashflow_basics.get(t, {}),
             sma_data.get(t, {}).get("sma"),
+            earnings_history.get(t, {}),
         )
         for t in tickers
     ]

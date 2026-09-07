@@ -361,6 +361,12 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         ("   Market Cap: ", "bold"), (mktcap_str, "cyan"),
         ("   Sector: ", "bold"), (sector_str, ""),
     ))
+    if snap.industry:
+        lines.append(Text.assemble(("  Industry: ", "bold"), (snap.industry, "")))
+    if snap.business_segments:
+        lines.append(Text.assemble(
+            ("  Business Segments: ", "bold"), (", ".join(snap.business_segments), "cyan"),
+        ))
     lines.append(Text(""))
 
     # ── 1. PE Ratio ──────────────────────────────────────────────────────
@@ -704,6 +710,60 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
             lines.append(Text("  Steps 8-10: N/A — need shares outstanding for per-share value", style="dim"))
     else:
         lines.append(Text("  DCF not available — insufficient data (need revenue estimate + profit margin or FCF > 0)", style="dim"))
+    lines.append(Text(""))
+
+    # ── 8. Earnings Growth Trend ────────────────────────────────────────
+    lines.append(Rule(" 8. Earnings Growth Trend (Revenue → Net Income) ", style="cyan"))
+    hint("How much revenue actually turns into profit each period, and whether that's improving.")
+    lines.append(Text(""))
+
+    def _margin_color(pct: float) -> str:
+        return "green" if pct > 20 else ("yellow" if pct > 5 else "red")
+
+    def _growth_color(pct: Optional[float]) -> str:
+        if pct is None:
+            return "dim"
+        return "green" if pct > 15 else ("yellow" if pct > 0 else "red")
+
+    def _period_table(title: str, periods: list, growth_label: str) -> Table:
+        t = Table(title=title, show_header=True, header_style="bold", box=None, pad_edge=False, padding=(0, 2))
+        t.add_column("Period", style="bold")
+        t.add_column("Revenue", justify="right")
+        t.add_column("Net Income", justify="right")
+        t.add_column("Margin", justify="right")
+        t.add_column(growth_label, justify="right")
+        for p in reversed(periods):  # oldest first
+            growth_str = f"{p.growth_pct:+.1f}%" if p.growth_pct is not None else "—"
+            t.add_row(
+                p.period,
+                _fmt_large(p.revenue),
+                _fmt_large(p.net_income),
+                Text(f"{p.margin_pct:.1f}%", style=_margin_color(p.margin_pct)),
+                Text(growth_str, style=_growth_color(p.growth_pct)),
+            )
+        return t
+
+    if snap.earnings_quarters:
+        lines.append(_period_table("Quarterly", snap.earnings_quarters, "QoQ"))
+        lines.append(Text(""))
+    if snap.earnings_years:
+        lines.append(_period_table("Annual", snap.earnings_years, "YoY"))
+        lines.append(Text(""))
+
+    if not snap.earnings_quarters and not snap.earnings_years:
+        lines.append(Text("  Not available — yfinance returned no income statement data.", style="dim"))
+    else:
+        if snap.earnings_simple_note:
+            lines.append(Text.assemble(("  ", ""), (snap.earnings_simple_note, "bold white")))
+        if snap.earnings_margin_trend:
+            mt_color = {"EXPANDING": "green", "STABLE": "yellow", "COMPRESSING": "red"}.get(snap.earnings_margin_trend, "white")
+            mt_hint = {
+                "EXPANDING": "The company is keeping more of each revenue dollar over time — pricing power or efficiency gains.",
+                "STABLE": "Profitability is consistent year to year.",
+                "COMPRESSING": "The company is keeping less of each revenue dollar — costs growing faster than sales.",
+            }
+            lines.append(Text.assemble(("  Margin Trend: ", "bold"), (snap.earnings_margin_trend, f"bold {mt_color}")))
+            hint(mt_hint.get(snap.earnings_margin_trend, ""))
 
     console.print(Panel(
         Group(*lines),

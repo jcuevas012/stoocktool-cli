@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -128,7 +128,6 @@ echo 'FMP_API_KEY=' >> .env
 - `annualReportExpenseRatio` and `trailingAnnualDividendYield` are no longer populated for most ETFs. Use `netExpenseRatio` and `dividendYield` instead — both are "decimal percentage" fields (0.03 = 0.03%, 1.07 = 1.07%) like `dividendYield` above, so divide by 100 to store as a true fraction if that's your field's convention.
 - ETFs often lack `currentPrice` in `.info` (populated as `regularMarketPrice`/`previousClose` instead, or not at all). `stocktool etf valuation` sidesteps this by sourcing current price from price-history close throughout, rather than from `.info`.
 - Per-stock `earningsGrowth` is a noisy trailing YoY figure that can spike to 1000%+ off a near-zero prior-year base (e.g. a cyclical semiconductor coming out of a down year) — clip/cap it before using in any weighted or aggregate calculation.
-- `ticker.quarterly_earnings` is deprecated and returns `None` in current yfinance — use `ticker.quarterly_income_stmt` / `ticker.income_stmt` (`"Total Revenue"`, `"Net Income"` rows) instead. `quarterly_income_stmt` only returns the trailing ~5 quarters (not a full 8-quarter YoY-by-quarter window).
 
 ## Commands
 
@@ -265,11 +264,8 @@ Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimate
 | 5 | Avg PE (6m) | Mean(close prices) / trailing EPS over 6 months | price history + `trailingEps` |
 | 6 | Analyst Price Targets | Low / Mean / High price targets, upside %, analyst count, consensus, 200-day SMA & % vs price | `targetLowPrice`, `targetMeanPrice`, `targetHighPrice`, `recommendationKey`, `data.fetch_sma_data()` |
 | — | Valuation Projection | Revenue × margin = earnings; earnings × avg PE = future market cap → possible return | computed |
-| 8 | Earnings Growth Trend | Quarterly & annual Revenue/Net Income, net margin, QoQ/YoY growth, margin trend | `data.fetch_earnings_history()` — see dedicated section below |
 
 **200-Day SMA in Analyst Price Targets:** reuses `data.fetch_sma_data(tickers, sma_days=200)` (same helper as `portfolio sma` / `strategy dip`) — one extra `yf.download(period="1y")` call per `valuation` invocation. Stored on `ValuationSnapshot` as `sma_200` (price) and `pct_from_sma_200` (`(current_price / sma_200 - 1) * 100`). Green when price ≥ SMA (long-term uptrend), red when below (potential value entry, same convention as `portfolio sma`'s BELOW SMA flag). Rendered in both the Rich panel (`display.py`) and the HTML report's Analyst Price Targets card (`html_report.py`); omitted entirely when yfinance doesn't return enough history (< 200 daily bars).
-
-**Company Overview (Sector / Industry / Business Segments):** shown in the panel header, right below Price/Market Cap/Sector. Yahoo Finance's "Investment Themes" widget (per-theme 1-year performance, e.g. Google's "Publicidad +9.67%") was evaluated and rejected as a data source — it isn't exposed by yfinance's `.info`, any other `Ticker` method, or the underlying `quoteSummary` modules (`sectorTrend`/`industryTrend` return empty), and doesn't appear in Yahoo Finance's page HTML either, indicating it's a Yahoo Finance Plus (paid) feature with no free API path. Instead: `industry` comes straight from `info.get("industryDisp") or info.get("industry")`; `business_segments` is a **best-effort regex extraction** from `longBusinessSummary` (`analysis._extract_business_segments`) matching yfinance's two consistent vendor-text templates — `"operates through/in [N] segments: A, B, and C."` (MSFT, JNJ, JPM style) and `"operates through A, B, and C segments."` (GOOG, XOM style). Returns `[]` for single-segment/non-diversified companies (e.g. AAPL, V, KO) whose summary doesn't use either template — callers fall back to sector/industry alone in that case. Capped at 8 segments / 60 chars each as a guard against mis-captures. Rendered as a comma list in the Rich panel and as badge chips under the ticker name in the HTML hero card.
 
 **Projection formula:**
 
@@ -336,35 +332,6 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 4. If none positive → DCF section shows "insufficient data"
 
 **New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
-
-## Earnings Growth Trend (Section 8 of `stocktool valuation`)
-
-Appended automatically to every `valuation` panel, right after the DCF section. Answers a simple question in plain numbers: how much of each quarter's/year's revenue actually becomes profit, and is that improving?
-
-**Data fetched:** `data.fetch_earnings_history()` pulls `Total Revenue` and `Net Income` from `ticker.quarterly_income_stmt` (last ~5 quarters) and `ticker.income_stmt` (last ~4-5 fiscal years, one call per ticker, parallelized like the other `data.py` fetchers). Periods missing either revenue or net income (e.g. yfinance's stale oldest annual column) are dropped rather than shown as N/A. `ticker.quarterly_earnings` is deprecated/empty in current yfinance and is not used.
-
-**Computed in `analysis._build_earnings_periods` / `build_valuation_snapshot`:**
-
-```
-Margin (per period)  = Net Income / Revenue × 100
-Growth (per period)  = (Revenue / Prior-Period Revenue - 1) × 100   [QoQ for quarters, YoY for years]
-```
-
-Growth is `None` for the oldest period in each list (no prior period available in the fetched window).
-
-**Simple-English note** (`earnings_simple_note`): built from the latest fiscal year (falls back to the latest quarter if no annual data resolved), e.g. *"For every $10 in revenue, AAPL keeps $2.69 in profit — a 26.9% margin."* — directly answers the "if revenue is 10 and net income is 2" framing.
-
-**Margin trend** (`earnings_margin_trend`, via `analysis._earnings_margin_trend`): direction of net margin across fiscal years, newest-first — mirrors the Owner Earnings trend heuristic (`build_owner_earnings_snapshot`):
-- 3+ years → counts up/down moves between consecutive years; more ups → EXPANDING, more downs → COMPRESSING, tie → STABLE
-- Exactly 2 years → ±2 percentage-point threshold on the single YoY margin delta
-- < 2 years → `None` (not shown)
-
-**Thresholds (reused from existing conventions, not new ones):**
-
-- Margin color: green > 20%, yellow 5–20%, red < 5% — same bands as Section 4's Profit Margin
-- Growth color: green > 15%, yellow 0–15%, red < 0% — same bands as `analysis._score_growth`
-
-**New fields on `ValuationSnapshot`:** `earnings_quarters` / `earnings_years` (`list[EarningsPeriod]`, newest-first; `EarningsPeriod` = `period, revenue, net_income, margin_pct, growth_pct`), `earnings_margin_trend`, `earnings_simple_note`. Rendered as two tables (Quarterly QoQ, Annual YoY) in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_earnings_trend_card`).
 
 ## Quick Value Check (`stocktool value`)
 
@@ -538,4 +505,4 @@ Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks yo
 | Horizon Return| > 5%          | 0–5%         | < 0           |
 
 ***Consideration***
-When new feature is added please update the CLAUDE.md documentation with the principles to consider as help for future feature
+When new feature is added please update the AGENTS.md documentation with the principles to consider as help for future feature

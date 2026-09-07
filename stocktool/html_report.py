@@ -185,6 +185,12 @@ _TIPS = {
     "etf_entry_zone":   "Tier 1 (DCA Pullback) = min(50-day EMA, Price × 0.95).\nTier 2 (Valuation Reversion) = min(Fair Value, 200-day SMA).\nTwo disciplined price levels for phased entries.",
     "etf_projection":   "5-Year Projection: Projected EPS = Current EPS-equivalent × (1 + growth)^5; Projected Price = Projected EPS × Terminal P/E (5Y avg).\nCurrent EPS-equivalent = Current Price ÷ Trailing P/E — a basket-level approximation, not a literal reported EPS.",
     "etf_mos":          "Margin of Safety = (Fair Value − Current Price) ÷ Current Price.\nThe cushion between the estimated fair value and what you'd pay today.\n\n✅ > 25% — solid buying opportunity\n🟡 5–25% — fair value zone\n🔴 < 5% or negative — little to no margin",
+    # ── Earnings Growth Trend ────────────────────────────────────────────────
+    "earn_quarterly":   "Revenue and Net Income for each of the last several fiscal quarters, with the net margin (Net Income ÷ Revenue) and quarter-over-quarter growth.\nShows the in-year cadence — is the business accelerating or slowing quarter to quarter?",
+    "earn_annual":      "Revenue and Net Income for each of the last several fiscal years, with the net margin and year-over-year growth.\nSmooths out quarterly noise — the trend that matters most for a multi-year holding.",
+    "earn_margin":      "Net Income ÷ Revenue for the period — of every dollar in sales, how much becomes profit.\n\n✅ > 20% — strong pricing power\n🟡 5–20% — competitive but manageable\n🔴 < 5% — thin margins",
+    "earn_growth":      "Growth in Revenue vs. the prior period of the same cadence (QoQ for quarters, YoY for years).\n\n✅ > 15% — strong growth\n🟡 0–15% — modest growth\n🔴 Negative — shrinking",
+    "earn_trend":       "Direction of the net margin across the last several fiscal years.\n\n✅ EXPANDING — keeping more of each revenue dollar over time\n🟡 STABLE — consistent profitability\n🔴 COMPRESSING — costs growing faster than sales",
 }
 
 
@@ -794,6 +800,85 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
 </div>"""
 
 
+def _margin_css(pct: float) -> str:
+    return "var(--clr-green)" if pct > 20 else ("var(--clr-yellow)" if pct > 5 else "var(--clr-red)")
+
+
+def _growth_css(pct: Optional[float]) -> str:
+    if pct is None:
+        return "var(--clr-muted)"
+    return "var(--clr-green)" if pct > 15 else ("var(--clr-yellow)" if pct > 0 else "var(--clr-red)")
+
+
+def _earnings_period_rows(periods: list) -> str:
+    rows = []
+    for p in reversed(periods):  # oldest first
+        growth_html = (
+            f'<span style="color:{_growth_css(p.growth_pct)}">{p.growth_pct:+.1f}%</span>'
+            if p.growth_pct is not None else '<span class="na">—</span>'
+        )
+        rows.append(
+            f'<tr><td>{html.escape(p.period)}</td>'
+            f'<td style="text-align:right">{_fmt_large(p.revenue)}</td>'
+            f'<td style="text-align:right">{_fmt_large(p.net_income)}</td>'
+            f'<td style="text-align:right; color:{_margin_css(p.margin_pct)}">{p.margin_pct:.1f}%</td>'
+            f'<td style="text-align:right">{growth_html}</td></tr>'
+        )
+    return "".join(rows)
+
+
+def _render_earnings_trend_card(snap: "ValuationSnapshot") -> str:
+    """Render the Earnings Growth Trend card (Section 8) for the HTML report."""
+    if not snap.earnings_quarters and not snap.earnings_years:
+        return ""
+
+    quarterly_table = ""
+    if snap.earnings_quarters:
+        quarterly_table = f"""
+    <p style="font-size:.72rem; color:var(--clr-muted); text-transform:uppercase; letter-spacing:.07em; margin:14px 0 4px">Quarterly (QoQ)</p>
+    <table style="width:100%; font-size:.78rem; border-collapse:collapse">
+      <thead><tr style="color:var(--clr-muted); text-align:left">
+        <th>Period</th><th style="text-align:right">Revenue</th><th style="text-align:right">Net Income</th>
+        <th style="text-align:right">Margin</th><th style="text-align:right">QoQ</th>
+      </tr></thead>
+      <tbody>{_earnings_period_rows(snap.earnings_quarters)}</tbody>
+    </table>"""
+
+    annual_table = ""
+    if snap.earnings_years:
+        annual_table = f"""
+    <p style="font-size:.72rem; color:var(--clr-muted); text-transform:uppercase; letter-spacing:.07em; margin:14px 0 4px">Annual (YoY)</p>
+    <table style="width:100%; font-size:.78rem; border-collapse:collapse">
+      <thead><tr style="color:var(--clr-muted); text-align:left">
+        <th>Year</th><th style="text-align:right">Revenue</th><th style="text-align:right">Net Income</th>
+        <th style="text-align:right">Margin</th><th style="text-align:right">YoY</th>
+      </tr></thead>
+      <tbody>{_earnings_period_rows(snap.earnings_years)}</tbody>
+    </table>"""
+
+    trend = snap.earnings_margin_trend
+    trend_css = {"EXPANDING": "var(--clr-green)", "STABLE": "var(--clr-yellow)", "COMPRESSING": "var(--clr-red)"}.get(trend or "", "var(--clr-muted)")
+    trend_html = (
+        f'<div class="has-tip" data-tip="{html.escape(_TIPS["earn_trend"])}" style="margin-top:14px; cursor:help">'
+        f'<span style="font-size:.72rem; color:var(--clr-muted); text-transform:uppercase; letter-spacing:.07em">Margin Trend </span>'
+        f'<span style="font-weight:700; color:{trend_css}">{html.escape(trend)}</span></div>'
+    ) if trend else ""
+
+    note_html = (
+        f'<p style="font-size:.88rem; font-weight:600; margin-top:14px">{html.escape(snap.earnings_simple_note)}</p>'
+        if snap.earnings_simple_note else ""
+    )
+
+    return f"""
+<div class="card" style="margin-bottom:24px">
+  <div class="card-title"><span class="card-icon">📈</span>Earnings Growth Trend (Revenue → Net Income)</div>
+  {quarterly_table}
+  {annual_table}
+  {note_html}
+  {trend_html}
+</div>"""
+
+
 def _render_valuation_section(snap: "ValuationSnapshot") -> str:
     # PE category
     pe_label, pe_color_name = pe_category(snap.pe_ratio)
@@ -964,6 +1049,7 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
 </div>
 
 {_render_dcf_card(snap)}
+{_render_earnings_trend_card(snap)}
 """
 
 
@@ -1315,6 +1401,9 @@ def _render_comparison_table(snapshots: list[AnySnapshot]) -> str:
 def _render_ticker_block(snap: AnySnapshot) -> str:
     ticker = snap.ticker
     sector = getattr(snap, "sector", None) or "Unknown"
+    industry = getattr(snap, "industry", None)
+    sub_parts = [sector] + ([industry] if industry else [])
+    sub_disp = " &nbsp;·&nbsp; ".join(html.escape(p) for p in sub_parts)
     price = getattr(snap, "current_price", None)
     price_disp = f"${price:.2f}" if price is not None else "N/A"
 
@@ -1337,11 +1426,18 @@ def _render_ticker_block(snap: AnySnapshot) -> str:
         report_type = "Analysis"
         content = "<p>No data available.</p>"
 
+    segments = getattr(snap, "business_segments", None) or []
+    segments_html = ""
+    if segments:
+        chips = "".join(f'<span class="badge" style="margin:2px 4px 2px 0">{html.escape(s)}</span>' for s in segments)
+        segments_html = f'<div style="margin-top:6px">{chips}</div>'
+
     return f"""
 <div class="hero-card">
   <div class="hero-left">
     <h2>{html.escape(ticker)}</h2>
-    <div class="ticker-sub">{html.escape(sector)} &nbsp;·&nbsp; {html.escape(report_type)}</div>
+    <div class="ticker-sub">{sub_disp} &nbsp;·&nbsp; {html.escape(report_type)}</div>
+    {segments_html}
   </div>
   <div class="hero-right">
     <div class="hero-price">{html.escape(price_disp)}</div>

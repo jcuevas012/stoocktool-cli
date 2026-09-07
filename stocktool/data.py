@@ -157,6 +157,55 @@ def fetch_cashflow_basics(tickers: list[str]) -> dict[str, dict]:
     return results
 
 
+def fetch_earnings_history(tickers: list[str]) -> dict[str, dict]:
+    """Fetch quarterly and annual Revenue/Net Income for earnings-trend analysis.
+
+    Returns {ticker: {"quarters": [{"period": str, "revenue": float, "net_income": float}, ...],
+                       "years": [{"period": str, "revenue": float, "net_income": float}, ...]}}
+    Both lists are newest-first, matching yfinance's column order. Columns with a
+    missing revenue or net income (e.g. yfinance's stale oldest annual column) are dropped.
+    """
+    results: dict[str, dict] = {}
+
+    def _get(frame, col, *keys):
+        for key in keys:
+            if key in frame.index and pd.notna(frame.loc[key, col]):
+                return float(frame.loc[key, col])
+        return None
+
+    def _extract(frame) -> list[dict]:
+        periods: list[dict] = []
+        if frame is None or frame.empty:
+            return periods
+        for col in frame.columns:
+            revenue = _get(frame, col, "Total Revenue", "Operating Revenue")
+            net_income = _get(frame, col, "Net Income", "Net Income Common Stockholders",
+                               "Net Income From Continuing Operations")
+            if revenue is None or net_income is None:
+                continue
+            label = str(col.date()) if hasattr(col, "date") else str(col)
+            periods.append({"period": label, "revenue": revenue, "net_income": net_income})
+        return periods
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        try:
+            t = yf.Ticker(ticker)
+            return ticker, {
+                "quarters": _extract(t.quarterly_income_stmt),
+                "years": _extract(t.income_stmt),
+            }
+        except Exception:
+            return ticker, {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, out = future.result()
+            results[ticker] = out
+
+    return results
+
+
 def fetch_revenue_estimates(tickers: list[str]) -> dict[str, float | None]:
     """Fetch next-year analyst revenue estimates for each ticker in parallel."""
     results: dict[str, float | None] = {}

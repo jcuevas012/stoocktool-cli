@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -56,9 +57,21 @@ def build_snapshot(
 
 
 @dataclass
+class EarningsPeriod:
+    """One quarter or fiscal year of Revenue/Net Income, for the earnings-trend section."""
+    period: str
+    revenue: float
+    net_income: float
+    margin_pct: float                    # net_income / revenue * 100
+    growth_pct: Optional[float] = None    # vs prior period of the same cadence (QoQ or YoY)
+
+
+@dataclass
 class ValuationSnapshot:
     ticker: str
     sector: Optional[str] = None
+    industry: Optional[str] = None
+    business_segments: list[str] = field(default_factory=list)
     current_price: Optional[float] = None
     market_cap: Optional[float] = None
     # PE
@@ -112,6 +125,11 @@ class ValuationSnapshot:
     margin_of_safety_pct: Optional[float] = None       # step 9 (%)
     iv_rating: Optional[str] = None             # step 10 label
     iv_rating_color: Optional[str] = None       # "green" / "yellow" / "red"
+    # Earnings Growth Trend (Section 8)
+    earnings_quarters: list[EarningsPeriod] = field(default_factory=list)  # newest first
+    earnings_years: list[EarningsPeriod] = field(default_factory=list)     # newest first
+    earnings_margin_trend: Optional[str] = None   # "EXPANDING" / "STABLE" / "COMPRESSING"
+    earnings_simple_note: Optional[str] = None    # e.g. "For every $10 in revenue, keeps $2.70 (27%)"
 
 
 def pe_category(pe: Optional[float]) -> tuple[str, str]:
@@ -204,6 +222,100 @@ def _iv_rating(margin_of_safety: float) -> tuple[str, str]:
     return "★ Overvalued", "red"
 
 
+def _extract_business_segments(long_summary: str) -> list[str]:
+    """Best-effort extraction of reportable segment names from yfinance's longBusinessSummary.
+
+    yfinance's vendor-supplied descriptions follow one of two consistent templates for
+    multi-segment companies: "operates through/in [N] segments: A, B, and C." or
+    "operates through A, B, and C segments." Single-segment / non-diversified companies
+    won't match either — callers should fall back to sector/industry alone in that case.
+    """
+    if not long_summary:
+        return []
+
+    match = re.search(
+        r"operates (?:through|in)\s+(?:an?|one|two|three|four|five|six|seven|eight|nine|ten)?\s*"
+        r"(?:reportable\s+)?segments?[:,]\s*([^.]+)\.",
+        long_summary,
+    )
+    if not match:
+        match = re.search(
+            r"operates (?:through|in)\s+([^.]+?)\s+(?:reportable\s+)?segments?\b",
+            long_summary,
+        )
+    if not match:
+        return []
+
+    segment_list = match.group(1)
+    if "," in segment_list:
+        parts = [p.strip() for p in segment_list.split(",") if p.strip()]
+        if parts:
+            parts[-1] = re.sub(r"^and\s+", "", parts[-1], flags=re.IGNORECASE)
+    else:
+        parts = [p.strip() for p in re.split(r"\s+and\s+", segment_list, maxsplit=1)]
+
+    segments = [p for p in parts if p and len(p) <= 60]
+    return segments if 1 < len(segments) <= 8 else []
+
+
+def _build_earnings_periods(raw_periods: list[dict]) -> list[EarningsPeriod]:
+    """Convert newest-first raw {period, revenue, net_income} dicts into EarningsPeriod,
+    with margin and growth (vs the next-older period in the list) computed."""
+    periods: list[EarningsPeriod] = []
+    for i, p in enumerate(raw_periods):
+        revenue = p["revenue"]
+        net_income = p["net_income"]
+        margin_pct = (net_income / revenue * 100) if revenue else 0.0
+
+        growth_pct: Optional[float] = None
+        if i + 1 < len(raw_periods):
+            prior_revenue = raw_periods[i + 1]["revenue"]
+            if prior_revenue:
+                growth_pct = (revenue / prior_revenue - 1) * 100
+
+        periods.append(EarningsPeriod(
+            period=p["period"], revenue=revenue, net_income=net_income,
+            margin_pct=margin_pct, growth_pct=growth_pct,
+        ))
+    return periods
+
+
+def _earnings_margin_trend(years: list[EarningsPeriod]) -> Optional[str]:
+    """Direction of the net-margin trend across fiscal years (newest first).
+
+    Mirrors the owner-earnings trend heuristic: 3+ years counts up/down moves;
+    exactly 2 years falls back to a +/-2 percentage-point threshold on the single delta.
+    """
+    if len(years) >= 3:
+        margins = [y.margin_pct for y in years]
+        ups = sum(1 for i in range(len(margins) - 1) if margins[i] > margins[i + 1])
+        downs = sum(1 for i in range(len(margins) - 1) if margins[i] < margins[i + 1])
+        if ups > downs:
+            return "EXPANDING"
+        if downs > ups:
+            return "COMPRESSING"
+        return "STABLE"
+    if len(years) == 2:
+        delta = years[0].margin_pct - years[1].margin_pct
+        if delta > 2:
+            return "EXPANDING"
+        if delta < -2:
+            return "COMPRESSING"
+        return "STABLE"
+    return None
+
+
+def _earnings_simple_note(ticker: str, latest: Optional[EarningsPeriod]) -> Optional[str]:
+    """Plain-English translation of the net margin, e.g. '$10 revenue -> $2.70 profit (27%)'."""
+    if latest is None or not latest.revenue:
+        return None
+    per_ten = latest.net_income / latest.revenue * 10
+    return (
+        f"For every $10 in revenue, {ticker} keeps ${per_ten:.2f} in profit "
+        f"— a {latest.margin_pct:.1f}% margin."
+    )
+
+
 def build_valuation_snapshot(
     ticker: str,
     info: dict,
@@ -212,6 +324,7 @@ def build_valuation_snapshot(
     bs_data: Optional[dict] = None,
     cf_data: Optional[dict] = None,
     sma_200: Optional[float] = None,
+    earnings_data: Optional[dict] = None,
 ) -> "ValuationSnapshot":
     """Build a ValuationSnapshot with projected future market cap, return, and DCF intrinsic value."""
     bs_data = bs_data or {}
@@ -337,9 +450,23 @@ def build_valuation_snapshot(
             margin_of_safety_pct = (intrinsic_value_per_share - current_price) / intrinsic_value_per_share * 100
             iv_rating, iv_rating_color = _iv_rating(margin_of_safety_pct / 100)
 
+    industry = info.get("industryDisp") or info.get("industry")
+    business_segments = _extract_business_segments(info.get("longBusinessSummary") or "")
+
+    # ── Earnings Growth Trend (Section 8) ──────────────────────────────────
+    earnings_data = earnings_data or {}
+    earnings_quarters = _build_earnings_periods(earnings_data.get("quarters", []))
+    earnings_years = _build_earnings_periods(earnings_data.get("years", []))
+    earnings_margin_trend = _earnings_margin_trend(earnings_years)
+    earnings_simple_note = _earnings_simple_note(
+        ticker, earnings_years[0] if earnings_years else (earnings_quarters[0] if earnings_quarters else None)
+    )
+
     return ValuationSnapshot(
         ticker=ticker,
         sector=info.get("sector"),
+        industry=industry,
+        business_segments=business_segments,
         current_price=current_price,
         market_cap=market_cap,
         pe_ratio=pe_ratio,
@@ -385,6 +512,10 @@ def build_valuation_snapshot(
         margin_of_safety_pct=margin_of_safety_pct,
         iv_rating=iv_rating,
         iv_rating_color=iv_rating_color,
+        earnings_quarters=earnings_quarters,
+        earnings_years=earnings_years,
+        earnings_margin_trend=earnings_margin_trend,
+        earnings_simple_note=earnings_simple_note,
     )
 
 
