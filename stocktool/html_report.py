@@ -25,6 +25,7 @@ from .analysis import (
     score_ticker,
     pe_category,
     cash_debt_rating,
+    capex_intensity_color,
     _score_pe,
     _score_growth,
     _score_margin,
@@ -150,6 +151,8 @@ _TIPS = {
     # ── DCF card ────────────────────────────────────────────────────────────
     "dcf_ni":           "Normalized Net Income = Next-Year Revenue Estimate × Profit Margin.\nThe starting annual profit used to seed the DCF model.\nMore forward-looking than reported trailing net income.",
     "dcf_oe":           "Owner Earnings (Buffett's definition):\nNet Income + Depreciation − Capital Expenditures\n\nCaptures the true cash generated for owners after maintaining and replacing assets.\nHigher than net income = business generates more cash than it reports (good).\nLower = heavy capex drag on reported earnings.",
+    "dcf_capex_rev":    "CapEx as % of TTM Revenue = abs(CapEx) / Total Revenue × 100.\nHow much of every sales dollar gets reinvested into property, plant & equipment.\n\n✅ < 25% — capital-light\n🟡 25–50% — moderate reinvestment\n🔴 ≥ 50% — heavy capex vs. revenue",
+    "dcf_capex_ni":     "CapEx as % of TTM Net Income = abs(CapEx) / Net Income × 100.\nHow much of reported profit gets absorbed by reinvestment. N/A when net income ≤ 0.\n\n✅ < 25% — capital-light\n🟡 25–50% — moderate reinvestment\n🔴 ≥ 50% — capex eats most of the profit",
     "dcf_growth":       "Annual Owner Earnings growth rate applied for 10 years.\nDerived conservatively from trailing revenue & EPS growth, capped by ROE quality tier:\n\n✅ High-ROIC (ROE>25%): capped at 15%\n🟡 Solid allocator (ROE>15%): capped at 12%\n⚪ Average business: capped at 8%\n\nVery high trailing growth is capped to avoid unrealistic projections.",
     "dcf_discount":     "Required annual return (discount rate) = 10%.\nAll future cash flows are divided by (1.10)^year to get today's equivalent value.\nBuffett benchmarks against 10% as the long-run US equity average.\nA higher rate would produce a lower (more conservative) intrinsic value.",
     "dcf_terminal":     "Perpetual growth rate assumed for all cash flows beyond year 10 = 2.5%.\nApproximates long-run nominal GDP growth. No business can outgrow the economy forever.\n\n⚠ Even a 0.5% change here meaningfully shifts terminal value — treat with skepticism.",
@@ -755,7 +758,7 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
   </p>
 </div>"""
 
-    color_map = {"green": "var(--clr-green)", "yellow": "var(--clr-yellow)", "red": "var(--clr-red)"}
+    color_map = {"green": "var(--clr-green)", "yellow": "var(--clr-yellow)", "red": "var(--clr-red)", "dim": "var(--clr-muted)"}
     mos = snap.margin_of_safety_pct
     mos_css = color_map.get(snap.iv_rating_color or "", "var(--clr-muted)")
     mos_str = f"{'+' if (mos or 0) >= 0 else ''}{mos:.1f}%" if mos is not None else "N/A"
@@ -765,6 +768,11 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
     growth_str = f"{snap.dcf_growth_rate:.1%}" if snap.dcf_growth_rate is not None else "N/A"
     growth_note = html.escape(snap.dcf_growth_note or "")
     oe_note = html.escape(snap.dcf_owner_earnings_note or "")
+
+    capex_rev_css = color_map.get(capex_intensity_color(snap.capex_pct_revenue), "var(--clr-muted)")
+    capex_rev_str = f"{snap.capex_pct_revenue:.1f}%" if snap.capex_pct_revenue is not None else "N/A"
+    capex_ni_css = color_map.get(capex_intensity_color(snap.capex_pct_net_income), "var(--clr-muted)")
+    capex_ni_str = f"{snap.capex_pct_net_income:.1f}%" if snap.capex_pct_net_income is not None else "N/A"
 
     return f"""
 <div class="card" style="margin-bottom:24px">
@@ -777,6 +785,8 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
       {_tr("Normalized Net Income", _fmt_large(snap.dcf_net_income), _TIPS["dcf_ni"])}
       {_tr("Owner Earnings", f'<span class="text-accent">{_fmt_large(snap.dcf_owner_earnings)}</span>', _TIPS["dcf_oe"])}
       <div style="font-size:.72rem; color:var(--clr-muted); margin-bottom:10px; padding-left:2px">↳ {oe_note}</div>
+      {_tr("CapEx % of Revenue", f'<span style="color:{capex_rev_css}">{capex_rev_str}</span>', _TIPS["dcf_capex_rev"])}
+      {_tr("CapEx % of Net Income", f'<span style="color:{capex_ni_css}">{capex_ni_str}</span>', _TIPS["dcf_capex_ni"])}
       {_tr("Growth Rate (10yr)", f'<span class="text-yellow">{growth_str}</span>', _TIPS["dcf_growth"])}
       <div style="font-size:.72rem; color:var(--clr-muted); margin-bottom:10px; padding-left:2px">↳ {growth_note}</div>
       {_tr("Discount Rate", f'{snap.dcf_discount_rate:.0%}', _TIPS["dcf_discount"])}

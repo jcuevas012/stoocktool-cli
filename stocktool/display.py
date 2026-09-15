@@ -10,7 +10,7 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    score_ticker, pe_category, cash_debt_rating,
+    score_ticker, pe_category, cash_debt_rating, capex_intensity_color,
 )
 from .portfolio import PortfolioSnapshot
 
@@ -653,6 +653,16 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         if snap.capex_cf is not None:
             capex_s = _fmt_large(abs(snap.capex_cf))
             lines.append(Text(f"            CapEx (subtract): {capex_s}", style="dim"))
+        if snap.capex_pct_revenue is not None:
+            lines.append(Text.assemble(
+                ("            CapEx % of Revenue: ", "dim"),
+                (f"{snap.capex_pct_revenue:.1f}%", capex_intensity_color(snap.capex_pct_revenue)),
+            ))
+        if snap.capex_pct_net_income is not None:
+            lines.append(Text.assemble(
+                ("            CapEx % of Net Income: ", "dim"),
+                (f"{snap.capex_pct_net_income:.1f}%", capex_intensity_color(snap.capex_pct_net_income)),
+            ))
         if snap.dcf_owner_earnings_note:
             lines.append(Text(f"          ↳ {snap.dcf_owner_earnings_note}", style="dim italic"))
         lines.append(Text(""))

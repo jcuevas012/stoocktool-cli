@@ -111,6 +111,8 @@ class ValuationSnapshot:
     # Cashflow statement data
     depreciation: Optional[float] = None
     capex_cf: Optional[float] = None             # negative value from yfinance
+    capex_pct_revenue: Optional[float] = None    # abs(capex_cf) / total_revenue * 100
+    capex_pct_net_income: Optional[float] = None # abs(capex_cf) / net_income * 100 (None if net_income <= 0)
     # DCF intrinsic value (10-step methodology)
     dcf_net_income: Optional[float] = None       # step 1 normalized NI
     dcf_owner_earnings: Optional[float] = None   # step 2
@@ -153,6 +155,17 @@ def cash_debt_rating(cash: Optional[float], debt: Optional[float]) -> tuple[str,
     if net > -cash * 0.5:
         return "GOOD", "yellow"
     return "CAUTION", "red"
+
+
+def capex_intensity_color(pct: Optional[float]) -> str:
+    """Color band for a CapEx-relative-to-profitability ratio: green<25%, yellow 25-50%, red>=50%."""
+    if pct is None:
+        return "dim"
+    if pct < 25:
+        return "green"
+    if pct < 50:
+        return "yellow"
+    return "red"
 
 
 def _select_dcf_growth_rate(
@@ -403,6 +416,21 @@ def build_valuation_snapshot(
     depreciation = _safe_float(cf_data.get("depreciation"))
     capex_cf = _safe_float(cf_data.get("capex"))  # negative value in yfinance
 
+    # CapEx as % of Revenue / Net Income (TTM actuals, same convention as capex_intensity_pct)
+    total_revenue_ttm = _safe_float(info.get("totalRevenue"))
+    net_income_ttm = _safe_float(info.get("netIncomeToCommon"))
+    if net_income_ttm is None and total_revenue_ttm and profit_margin:
+        net_income_ttm = total_revenue_ttm * profit_margin
+
+    capex_pct_revenue: Optional[float] = None
+    capex_pct_net_income: Optional[float] = None
+    if capex_cf is not None:
+        abs_capex = abs(capex_cf)
+        if total_revenue_ttm and total_revenue_ttm > 0:
+            capex_pct_revenue = abs_capex / total_revenue_ttm * 100
+        if net_income_ttm and net_income_ttm > 0:
+            capex_pct_net_income = abs_capex / net_income_ttm * 100
+
     # ── DCF Intrinsic Value (10-step Buffett methodology) ─────────────────
     discount_rate = 0.10
     terminal_growth = 0.025
@@ -499,6 +527,8 @@ def build_valuation_snapshot(
         free_cashflow=free_cashflow,
         depreciation=depreciation,
         capex_cf=capex_cf,
+        capex_pct_revenue=capex_pct_revenue,
+        capex_pct_net_income=capex_pct_net_income,
         dcf_net_income=dcf_net_income,
         dcf_owner_earnings=dcf_owner_earnings,
         dcf_owner_earnings_note=dcf_owner_earnings_note,

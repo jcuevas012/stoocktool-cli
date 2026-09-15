@@ -335,7 +335,18 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 3. Else if NI > 0 → NI used as fallback
 4. If none positive → DCF section shows "insufficient data"
 
-**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
+**CapEx as % of Revenue / Net Income:** two extra ratios shown alongside the Owner Earnings breakdown (Step 2), answering "how much of the top line / bottom line gets reinvested?" — a different denominator than `capex_intensity_pct` (Owner Earnings command), which divides by `NI + D&A` instead.
+
+```
+CapEx % of Revenue     = abs(capex_cf) / total_revenue_ttm × 100
+CapEx % of Net Income  = abs(capex_cf) / net_income_ttm × 100     [None if net_income_ttm <= 0]
+```
+
+`total_revenue_ttm` and `net_income_ttm` come straight from `.info["totalRevenue"]` / `.info["netIncomeToCommon"]` (fallback: `total_revenue_ttm × profit_margin` if `netIncomeToCommon` is missing) — no new yfinance call, reusing the same `info` dict already fetched for the rest of `valuation`. Both are TTM actuals, same period convention as `capex_cf` (latest fiscal year from the cashflow statement).
+
+Thresholds reuse the existing Capital Intensity bands via the shared `analysis.capex_intensity_color()` helper: green < 25%, yellow 25–50%, red ≥ 50% — same convention as `capex_intensity_pct`, not a new scale.
+
+**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `capex_pct_revenue`, `capex_pct_net_income`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
 
 ## Earnings Growth Trend (Section 8 of `stocktool valuation`)
 
