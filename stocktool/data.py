@@ -33,8 +33,8 @@ def fetch_fundamentals(tickers: list[str]) -> dict[str, dict]:
         try:
             info = yf.Ticker(ticker).info
             return ticker, info if isinstance(info, dict) else {}
-        except Exception:
-            return ticker, {}
+        except Exception as exc:
+            return ticker, {"_data_fetch_error": type(exc).__name__}
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(_fetch_one, t): t for t in tickers}
@@ -719,4 +719,6 @@ def _days_to_period(days: int) -> str:
         return "6mo"
     if days <= 365:
         return "1y"
-    return "2y"
+    if days <= 365 * 3:
+        return "3y"
+    return "5y"

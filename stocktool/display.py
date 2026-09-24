@@ -10,7 +10,7 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    score_ticker, pe_category, cash_debt_rating, capex_intensity_color,
+    score_ticker, pe_category, pe_vs_history_label, cash_debt_rating, capex_intensity_color,
 )
 from .portfolio import PortfolioSnapshot
 
@@ -367,6 +367,8 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         lines.append(Text.assemble(
             ("  Business Segments: ", "bold"), (", ".join(snap.business_segments), "cyan"),
         ))
+    for warning in snap.data_warnings:
+        lines.append(Text(f"  Data note: {warning}", style="yellow"))
     lines.append(Text(""))
 
     # ── 1. PE Ratio ──────────────────────────────────────────────────────
@@ -375,13 +377,26 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
     pe_label, pe_color = pe_category(snap.pe_ratio)
     pe_str = f"{snap.pe_ratio:.1f}x" if snap.pe_ratio else "N/A"
     avg_pe_str = f"{snap.avg_pe_6m:.1f}x" if snap.avg_pe_6m else "N/A"
+    avg_pe_3y_str = f"{snap.avg_pe_3y:.1f}x" if snap.avg_pe_3y else "N/A"
     lines.append(Text(""))
+    if snap.price_data_through:
+        lines.append(Text(f"  Price history through: {snap.price_data_through}  ·  Yahoo Finance / yfinance", style="dim"))
     lines.append(Text.assemble(("  Trailing PE:      ", "bold"), (pe_str, pe_color)))
     lines.append(Text.assemble(("  Investor Profile: ", "bold"), (pe_label, pe_color)))
     lines.append(Text.assemble(
-        ("  6-Month Avg PE:   ", "bold"), (avg_pe_str, "yellow"),
-        ("   ← used for projection below", "dim"),
+        ("  6-Month Price/EPS Proxy: ", "bold"), (avg_pe_str, "yellow"),
+        ("   ← current EPS; used below", "dim"),
     ))
+    lines.append(Text.assemble(("  3-Year Mean-Price P/E Proxy: ", "bold"), (avg_pe_3y_str, "yellow"),
+                               ("  (mean price ÷ current EPS)", "dim")))
+    if snap.pe_vs_history_pct is not None:
+        hist_label, hist_color = pe_vs_history_label(snap.pe_vs_history_pct)
+        sign = "+" if snap.pe_vs_history_pct >= 0 else ""
+        lines.append(Text.assemble(
+            ("  Price vs. 3Y Mean: ", "bold"),
+            (f"{sign}{snap.pe_vs_history_pct:.1f}%", hist_color),
+            (f"  {hist_label}", hist_color),
+        ))
     lines.append(Text(""))
 
     # ── 2. Cash & Debt Health ────────────────────────────────────────────
@@ -585,6 +600,7 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
 
     # ── Valuation Projection ─────────────────────────────────────────────
     lines.append(Rule(" Valuation Projection (5+ Year Value Investing View) ", style="bold magenta"))
+    hint("Single-case estimate: analyst next-year revenue × current profit margin, then the 6-month average P/E proxy; margins and valuation multiple are assumed unchanged.")
     hint("Conservative estimate of future value. For long-term holds, look for 50%+ upside potential.")
     lines.append(Text(""))
 
@@ -665,6 +681,8 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
             ))
         if snap.dcf_owner_earnings_note:
             lines.append(Text(f"          ↳ {snap.dcf_owner_earnings_note}", style="dim italic"))
+        if snap.dcf_data_note:
+            lines.append(Text(f"          Data limits: {snap.dcf_data_note}", style="dim italic"))
         lines.append(Text(""))
 
         growth_s = f"{snap.dcf_growth_rate:.1%}" if snap.dcf_growth_rate is not None else "N/A"
@@ -687,15 +705,20 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
 
         ev_s = _fmt_large(snap.dcf_enterprise_value) if snap.dcf_enterprise_value else "N/A"
         eq_s = _fmt_large(snap.dcf_equity_value) if snap.dcf_equity_value else "N/A"
-        lines.append(Text.assemble(("  Step 6  Enterprise Value:      ", "bold"), (ev_s, "white")))
+        lines.append(Text.assemble(("  Step 6  PV of Owner Earnings:  ", "bold"), (ev_s, "white")))
         lines.append(Text.assemble(
             ("  Step 7  Equity Value:          ", "bold"), (eq_s, "white"),
-            ("   (+ cash − debt)", "dim"),
+            ("   (net-income / equity basis; no cash/debt adjustment)", "dim"),
         ))
 
         if snap.intrinsic_value_per_share is not None:
             iv_s = f"${snap.intrinsic_value_per_share:.2f}"
             price_s = f"${snap.current_price:.2f}" if snap.current_price else "N/A"
+            sensitivity = (
+                f"${snap.intrinsic_value_low:.2f}–${snap.intrinsic_value_high:.2f}"
+                if snap.intrinsic_value_low is not None and snap.intrinsic_value_high is not None else "N/A"
+            )
+            lines.append(Text(f"  Sensitivity range: {sensitivity} per share (growth ±2pp; discount 12% / 8%; not a confidence interval)", style="dim"))
             lines.append(Text(""))
             lines.append(Text.assemble(
                 ("  Step 8  Intrinsic Value/Share: ", "bold"), (iv_s, "bold cyan"),
@@ -1954,7 +1977,7 @@ def render_cash_secured_puts(snapshots: list[CashSecuredPutSnapshot]) -> None:
         title="Cash-Secured Put Screener — Buffett Style",
         show_lines=True,
         header_style="bold cyan",
-        caption="Sell puts on stocks you'd happily own for 5–10 years. If assigned, you buy at a discount.",
+        caption="Annualized return extrapolates the quoted premium rate; it is not a forecast. Check bid-ask spread and live quotes before acting.",
     )
     table.add_column("#", style="dim", width=3)
     table.add_column("Ticker", style="bold")
@@ -1969,6 +1992,7 @@ def render_cash_secured_puts(snapshots: list[CashSecuredPutSnapshot]) -> None:
     table.add_column("Eff. Buy", justify="right")
     table.add_column("Discount", justify="right")
     table.add_column("OI", justify="right")
+    table.add_column("Spread", justify="right")
     table.add_column("Valuation", justify="center")
 
     for i, snap in enumerate(ranked, 1):
@@ -2016,6 +2040,7 @@ def render_cash_secured_puts(snapshots: list[CashSecuredPutSnapshot]) -> None:
             f"${snap.effective_buy_price:.2f}" if snap.effective_buy_price else "N/A",
             Text(f"{snap.discount_pct:.1f}%", style="green") if snap.discount_pct is not None else Text("N/A", style="dim"),
             f"{snap.open_interest:,}" if snap.open_interest else "N/A",
+            f"{snap.bid_ask_spread_pct:.1f}%" if snap.bid_ask_spread_pct is not None else "N/A",
             Text(verdict, style=verdict_color),
         )
 
@@ -2043,8 +2068,7 @@ def render_cash_secured_puts(snapshots: list[CashSecuredPutSnapshot]) -> None:
     total_cash = sum(s.cash_required for s in ranked if s.cash_required)
     lines.append(f"[bold]Total cash needed (all puts):[/bold] ${total_cash:,.0f}")
     lines.append(
-        "[dim]Targets: ~5% OTM strikes, 30-45 DTE. "
-        "If assigned, you own a great company at a discount.[/dim]"
+        "[dim]Targets: ~5% OTM strikes, 30-45 DTE. Effective buy price assumes fill at the displayed bid; actual fills may differ.[/dim]"
     )
 
     console.print(Panel(

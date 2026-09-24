@@ -73,10 +73,14 @@ class ValuationSnapshot:
     industry: Optional[str] = None
     business_segments: list[str] = field(default_factory=list)
     current_price: Optional[float] = None
+    price_data_through: Optional[str] = None
+    data_warnings: list[str] = field(default_factory=list)
     market_cap: Optional[float] = None
     # PE
     pe_ratio: Optional[float] = None       # trailing PE
-    avg_pe_6m: Optional[float] = None      # avg price / trailing EPS over 6 months
+    avg_pe_6m: Optional[float] = None      # mean 6m price / current trailing EPS
+    avg_pe_3y: Optional[float] = None      # price / current trailing EPS proxy over 3 years
+    pe_vs_history_pct: Optional[float] = None  # approximate current-price vs 3y mean-price change
     eps: Optional[float] = None
     # Profitability
     profit_margin: Optional[float] = None  # fraction (0.27 = 27%)
@@ -117,6 +121,7 @@ class ValuationSnapshot:
     dcf_net_income: Optional[float] = None       # step 1 normalized NI
     dcf_owner_earnings: Optional[float] = None   # step 2
     dcf_owner_earnings_note: Optional[str] = None
+    dcf_data_note: Optional[str] = None
     dcf_growth_rate: Optional[float] = None      # step 3
     dcf_growth_note: Optional[str] = None
     dcf_discount_rate: float = 0.10              # step 4
@@ -124,6 +129,8 @@ class ValuationSnapshot:
     dcf_enterprise_value: Optional[float] = None # step 6
     dcf_equity_value: Optional[float] = None     # step 7
     intrinsic_value_per_share: Optional[float] = None  # step 8
+    intrinsic_value_low: Optional[float] = None
+    intrinsic_value_high: Optional[float] = None
     margin_of_safety_pct: Optional[float] = None       # step 9 (%)
     iv_rating: Optional[str] = None             # step 10 label
     iv_rating_color: Optional[str] = None       # "green" / "yellow" / "red"
@@ -143,6 +150,17 @@ def pe_category(pe: Optional[float]) -> tuple[str, str]:
     if pe < 40:
         return "Medium Growth (20-39x) — expects 22-35% growth", "yellow"
     return "High Growth / High Risk (40+x) — expects ~100% growth", "red"
+
+
+def pe_vs_history_label(pct: Optional[float]) -> tuple[str, str]:
+    """Describe current price versus its 3-year mean-price proxy, without value claims."""
+    if pct is None:
+        return "N/A", "dim"
+    if pct <= -10:
+        return "Below 3-year mean price", "cyan"
+    if pct <= 10:
+        return "Near 3-year mean price", "yellow"
+    return "Above 3-year mean price", "cyan"
 
 
 def cash_debt_rating(cash: Optional[float], debt: Optional[float]) -> tuple[str, str]:
@@ -332,7 +350,7 @@ def _earnings_simple_note(ticker: str, latest: Optional[EarningsPeriod]) -> Opti
 def build_valuation_snapshot(
     ticker: str,
     info: dict,
-    history_6m: pd.DataFrame,
+    price_history: pd.DataFrame,
     next_year_revenue: Optional[float],
     bs_data: Optional[dict] = None,
     cf_data: Optional[dict] = None,
@@ -343,6 +361,18 @@ def build_valuation_snapshot(
     bs_data = bs_data or {}
     eps = _safe_float(info.get("trailingEps"))
     current_price = _safe_float(info.get("currentPrice"))
+    current_price_from_history = False
+    price_data_through: Optional[str] = None
+    history_close = pd.Series(dtype=float)
+    try:
+        history_close = price_history[(ticker, "Close")].dropna()
+        if not history_close.empty:
+            price_data_through = str(history_close.index.max().date())
+            if current_price is None:
+                current_price = float(history_close.iloc[-1])
+                current_price_from_history = True
+    except (KeyError, TypeError):
+        pass
     market_cap = _safe_float(info.get("marketCap"))
     profit_margin = _safe_float(info.get("profitMargins"))
     pe_ratio = _safe_float(info.get("trailingPE"))
@@ -372,18 +402,30 @@ def build_valuation_snapshot(
     if sma_200 and current_price and sma_200 > 0:
         pct_from_sma_200 = (current_price / sma_200 - 1) * 100
 
-    # 6-month average PE = mean(close prices) / trailing EPS
+    # These are price/current-EPS proxies, not historical P/E: past EPS is unavailable.
+    # price_history spans ~3 years; the 6-month window is sliced from it.
     avg_pe_6m: Optional[float] = None
+    avg_pe_3y: Optional[float] = None
+    avg_pe_6m_fallback = False
     if eps and eps > 0:
         try:
             close_col = (ticker, "Close")
-            series = history_6m[close_col].dropna()
+            series = price_history[close_col].dropna()
             if not series.empty:
-                avg_pe_6m = float(series.mean()) / eps
+                cutoff_6m = series.index.max() - pd.Timedelta(days=182)
+                series_6m = series[series.index >= cutoff_6m]
+                if not series_6m.empty:
+                    avg_pe_6m = float(series_6m.mean()) / eps
+                avg_pe_3y = float(series.mean()) / eps
         except (KeyError, TypeError):
             pass
     if avg_pe_6m is None:
         avg_pe_6m = pe_ratio  # fallback to current PE
+        avg_pe_6m_fallback = True
+
+    pe_vs_history_pct: Optional[float] = None
+    if pe_ratio and avg_pe_3y and avg_pe_3y > 0:
+        pe_vs_history_pct = (pe_ratio / avg_pe_3y - 1) * 100
 
     # Projections (PE-based)
     projected_earnings: Optional[float] = None
@@ -443,16 +485,20 @@ def build_valuation_snapshot(
     # Step 2: Owner Earnings = NI + Dep - Maintenance CapEx
     dcf_owner_earnings: Optional[float] = None
     dcf_owner_earnings_note: Optional[str] = None
+    dcf_data_note: Optional[str] = None
     if dcf_net_income is not None and depreciation is not None and capex_cf is not None:
         dcf_owner_earnings = dcf_net_income + depreciation + capex_cf  # capex_cf already negative
-        dcf_owner_earnings_note = "NI + D&A + CapEx (full formula)"
+        dcf_owner_earnings_note = "NI + D&A + CapEx (latest year; CapEx is total, not maintenance-only)"
+        dcf_data_note = "Working-capital changes are not included; latest reported D&A/CapEx are paired with forecast net income."
     elif dcf_net_income is not None and free_cashflow is not None and free_cashflow > 0:
         # FCF ≈ NI + D&A - CapEx, so use it as proxy when D&A/CapEx unavailable
         dcf_owner_earnings = free_cashflow
-        dcf_owner_earnings_note = "Free Cash Flow used (D&A/CapEx unavailable)"
+        dcf_owner_earnings_note = "Free Cash Flow proxy used (D&A/CapEx unavailable)"
+        dcf_data_note = "FCF is a proxy for owner earnings; working-capital treatment may differ from the full formula."
     elif dcf_net_income is not None and dcf_net_income > 0:
         dcf_owner_earnings = dcf_net_income
-        dcf_owner_earnings_note = "Net Income used as fallback (no FCF/D&A data)"
+        dcf_owner_earnings_note = "Net Income proxy used (no FCF/D&A data)"
+        dcf_data_note = "Net income omits reinvestment and working-capital needs, so this can overstate owner earnings."
 
     # Steps 3-10
     dcf_growth_rate: Optional[float] = None
@@ -460,6 +506,8 @@ def build_valuation_snapshot(
     dcf_enterprise_value: Optional[float] = None
     dcf_equity_value: Optional[float] = None
     intrinsic_value_per_share: Optional[float] = None
+    intrinsic_value_low: Optional[float] = None
+    intrinsic_value_high: Optional[float] = None
     margin_of_safety_pct: Optional[float] = None
     iv_rating: Optional[str] = None
     iv_rating_color: Optional[str] = None
@@ -468,11 +516,22 @@ def build_valuation_snapshot(
         dcf_growth_rate, dcf_growth_note = _select_dcf_growth_rate(revenue_growth, eps_growth, roe, roa)
         pv_oe, pv_tv = _run_dcf(dcf_owner_earnings, dcf_growth_rate, discount_rate, terminal_growth)
         dcf_enterprise_value = pv_oe + pv_tv
-        # Step 7: add cash, subtract debt
-        dcf_equity_value = dcf_enterprise_value + (total_cash or 0) - (total_debt or 0)
+        # Owner Earnings starts from net income, an equity cash-flow basis. Do not
+        # add cash or subtract debt, which would mix equity and enterprise methods.
+        dcf_equity_value = dcf_enterprise_value
         # Step 8: per-share
         if shares_outstanding and shares_outstanding > 0:
             intrinsic_value_per_share = dcf_equity_value / shares_outstanding
+            # Sensitivity envelope: lower growth/higher discount vs. higher growth/lower
+            # discount. It is a model range, not a confidence interval.
+            low_growth = max(0.0, dcf_growth_rate - 0.02)
+            high_growth = min(0.20, dcf_growth_rate + 0.02)
+            low_pv = sum(dcf_owner_earnings * (1 + low_growth) ** year / 1.12 ** year for year in range(1, 11))
+            low_terminal = dcf_owner_earnings * (1 + low_growth) ** 10 * (1 + terminal_growth) / (0.12 - terminal_growth) / 1.12 ** 10
+            high_pv = sum(dcf_owner_earnings * (1 + high_growth) ** year / 1.08 ** year for year in range(1, 11))
+            high_terminal = dcf_owner_earnings * (1 + high_growth) ** 10 * (1 + terminal_growth) / (0.08 - terminal_growth) / 1.08 ** 10
+            intrinsic_value_low = (low_pv + low_terminal) / shares_outstanding
+            intrinsic_value_high = (high_pv + high_terminal) / shares_outstanding
         # Step 9 & 10
         if intrinsic_value_per_share and current_price and intrinsic_value_per_share > 0:
             margin_of_safety_pct = (intrinsic_value_per_share - current_price) / intrinsic_value_per_share * 100
@@ -480,6 +539,23 @@ def build_valuation_snapshot(
 
     industry = info.get("industryDisp") or info.get("industry")
     business_segments = _extract_business_segments(info.get("longBusinessSummary") or "")
+    data_warnings: list[str] = []
+    fetch_error = info.get("_data_fetch_error")
+    if fetch_error:
+        data_warnings.append(f"Fundamentals request failed ({fetch_error}); verify ticker and data connection.")
+    elif not info:
+        data_warnings.append("Fundamental data unavailable; verify ticker and data connection.")
+    if current_price is None:
+        data_warnings.append("Current price unavailable from the fundamentals response.")
+    elif current_price_from_history:
+        data_warnings.append("Current price uses the latest available daily close because no current quote was returned.")
+    if price_data_through is None:
+        data_warnings.append("Price history unavailable; price-based comparisons are omitted.")
+    if next_year_revenue is None:
+        data_warnings.append("Next-year analyst revenue estimate unavailable; revenue-based projections are omitted.")
+    if avg_pe_6m_fallback and pe_ratio is not None:
+        reason = "price history unavailable" if price_data_through is None else "trailing EPS is not positive"
+        data_warnings.append(f"Projection multiple fell back to current trailing P/E because {reason}.")
 
     # ── Earnings Growth Trend (Section 8) ──────────────────────────────────
     earnings_data = earnings_data or {}
@@ -496,9 +572,13 @@ def build_valuation_snapshot(
         industry=industry,
         business_segments=business_segments,
         current_price=current_price,
+        price_data_through=price_data_through,
+        data_warnings=data_warnings,
         market_cap=market_cap,
         pe_ratio=pe_ratio,
         avg_pe_6m=avg_pe_6m,
+        avg_pe_3y=avg_pe_3y,
+        pe_vs_history_pct=pe_vs_history_pct,
         eps=eps,
         profit_margin=profit_margin,
         total_cash=total_cash,
@@ -532,6 +612,7 @@ def build_valuation_snapshot(
         dcf_net_income=dcf_net_income,
         dcf_owner_earnings=dcf_owner_earnings,
         dcf_owner_earnings_note=dcf_owner_earnings_note,
+        dcf_data_note=dcf_data_note,
         dcf_growth_rate=dcf_growth_rate,
         dcf_growth_note=dcf_growth_note,
         dcf_discount_rate=discount_rate,
@@ -539,6 +620,8 @@ def build_valuation_snapshot(
         dcf_enterprise_value=dcf_enterprise_value,
         dcf_equity_value=dcf_equity_value,
         intrinsic_value_per_share=intrinsic_value_per_share,
+        intrinsic_value_low=intrinsic_value_low,
+        intrinsic_value_high=intrinsic_value_high,
         margin_of_safety_pct=margin_of_safety_pct,
         iv_rating=iv_rating,
         iv_rating_color=iv_rating_color,
@@ -1036,6 +1119,9 @@ class CashSecuredPutSnapshot:
     # Selected put contract
     strike: Optional[float] = None
     premium: Optional[float] = None          # bid price per share
+    ask: Optional[float] = None
+    bid_ask_spread_pct: Optional[float] = None
+    breakeven_price: Optional[float] = None
     # Computed
     cash_required: Optional[float] = None    # strike * 100
     return_pct: Optional[float] = None       # premium / strike * 100
@@ -1085,6 +1171,9 @@ def build_csp_snapshot(
 
     strike = best["strike"]
     premium = best["bid"]
+    ask = best.get("ask")
+    midpoint = (premium + ask) / 2 if ask and ask > 0 else None
+    spread_pct = ((ask - premium) / midpoint * 100) if midpoint and ask >= premium else None
     dte = put_data.get("dte")
 
     cash_required = strike * 100
@@ -1104,6 +1193,9 @@ def build_csp_snapshot(
         dte=dte,
         strike=strike,
         premium=premium,
+        ask=ask,
+        bid_ask_spread_pct=spread_pct,
+        breakeven_price=strike - premium,
         cash_required=cash_required,
         return_pct=return_pct,
         annualized_return_pct=annualized,

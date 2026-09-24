@@ -252,13 +252,13 @@ yfinance has no field for a true multi-year historical average P/E, which the Fa
 ## Valuation Command (`stocktool valuation`)
 
 Full value-investing analysis template. Designed for 5+ year positions.
-Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimates + balance sheet + 1-year price history for the 200-day SMA.
+Fetches: `.info` fundamentals + 3-year price history (also sliced for the 6-month avg PE) + analyst revenue estimates + balance sheet + 1-year price history for the 200-day SMA.
 
 **Sections rendered (one panel per ticker):**
 
 | # | Section | Key Metric | Source |
 |---|---------|------------|--------|
-| 1 | PE Ratio | Trailing PE + 6-month avg PE + investor profile | `trailingPE`, price history |
+| 1 | PE Ratio & Price Context | Trailing PE + 6-month and 3-year price/EPS proxies + price vs. 3-year mean + investor profile | `trailingPE`, price history |
 | 2 | Cash & Debt Health | Cash, debt, net cash, debt/assets %, current ratio, quick ratio | `totalCash`, `totalDebt`, balance sheet, `currentRatio`, `quickRatio` |
 | 3 | Revenue Estimate | Next-year analyst avg revenue | `ticker.revenue_estimate['+1y']` |
 | 4 | Profit Margin | Trailing profit margin | `profitMargins` |
@@ -266,6 +266,8 @@ Fetches: `.info` fundamentals + 6-month price history + analyst revenue estimate
 | 6 | Analyst Price Targets | Low / Mean / High price targets, upside %, analyst count, consensus, 200-day SMA & % vs price | `targetLowPrice`, `targetMeanPrice`, `targetHighPrice`, `recommendationKey`, `data.fetch_sma_data()` |
 | — | Valuation Projection | Revenue × margin = earnings; earnings × avg PE = future market cap → possible return | computed |
 | 8 | Earnings Growth Trend | Quarterly & annual Revenue/Net Income, net margin, QoQ/YoY growth, margin trend | `data.fetch_earnings_history()` — see dedicated section below |
+
+**Three-Year Price Context:** `cli.py`'s `valuation` command fetches 3 years of price history in one call; the 6-month price/EPS proxy is sliced from that data. Both proxies divide mean prices by current trailing EPS, so neither represents historical P/E. The comparison of current P/E with the 3-year proxy reduces algebraically to current price versus the 3-year mean price; it is price context, not a cheap/expensive verdict. The report displays the last price-history date and identifies this limitation in terminal and HTML output.
 
 **200-Day SMA in Analyst Price Targets:** reuses `data.fetch_sma_data(tickers, sma_days=200)` (same helper as `portfolio sma` / `strategy dip`) — one extra `yf.download(period="1y")` call per `valuation` invocation. Stored on `ValuationSnapshot` as `sma_200` (price) and `pct_from_sma_200` (`(current_price / sma_200 - 1) * 100`). Green when price ≥ SMA (long-term uptrend), red when below (potential value entry, same convention as `portfolio sma`'s BELOW SMA flag). Rendered in both the Rich panel (`display.py`) and the HTML report's Analyst Price Targets card (`html_report.py`); omitted entirely when yfinance doesn't return enough history (< 200 daily bars).
 

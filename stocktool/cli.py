@@ -94,7 +94,7 @@ def valuation(
     tickers = [t.upper() for t in tickers]
     with console.status(f"Fetching valuation data for {', '.join(tickers)}..."):
         fundamentals = data.fetch_fundamentals(tickers)
-        history_6m = data.fetch_price_history(tickers, horizon_days=180)
+        price_history = data.fetch_price_history(tickers, horizon_days=365 * 3)
         revenue_estimates = data.fetch_revenue_estimates(tickers)
         balance_sheets = data.fetch_balance_sheets(tickers)
         cashflow_basics = data.fetch_cashflow_basics(tickers)
@@ -105,7 +105,7 @@ def valuation(
         analysis.build_valuation_snapshot(
             t,
             fundamentals.get(t, {}),
-            history_6m,
+            price_history,
             revenue_estimates.get(t),
             balance_sheets.get(t, {}),
             cashflow_basics.get(t, {}),

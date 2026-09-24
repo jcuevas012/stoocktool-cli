@@ -24,6 +24,7 @@ from .analysis import (
     ETFValuationSnapshot,
     score_ticker,
     pe_category,
+    pe_vs_history_label,
     cash_debt_rating,
     capex_intensity_color,
     _score_pe,
@@ -129,7 +130,9 @@ _TIPS = {
     "lo52":             "The lowest closing price over the past 52 weeks.\nCurrent price near the 52-week low can signal opportunity or a deteriorating business — dig deeper.",
     "horizon_return":   "Price return over the selected analysis horizon (default 90 days).\nMeasures recent momentum, not fundamental value.\n\n✅ > 5% — positive trend\n🟡 0–5% — flat\n🔴 Negative — recent price weakness",
     # ── Valuation section ───────────────────────────────────────────────────
-    "avg_pe_6m":        "Average P/E ratio over the past 6 months.\nSmooths out daily noise to show what investors have recently paid on average.\nUsed in the valuation projection to estimate future market cap.",
+    "avg_pe_6m":        "Mean share price over the past 6 months divided by today's trailing EPS. This is a current-EPS proxy, not historical P/E. Used as a recent price-multiple proxy in the projection.",
+    "avg_pe_3y":        "Three-year mean share price divided by today's trailing EPS. This is a price/current-EPS proxy, not historical P/E, because historical EPS is not used in this calculation.",
+    "pe_vs_history":    "Current price compared with the three-year mean price, using today's EPS in both implied P/E values. This is price context only; it does not show whether the stock is cheap or expensive versus historical earnings.",
     "inv_profile":      "Investment style implied by the current P/E multiple.\n\n< 20x — Value / Conservative (expects 12–15% growth)\n20–40x — Medium Growth (expects 22–35% growth)\n> 40x — High Growth / Speculative (expects ~100% growth)",
     "total_cash":       "Cash, equivalents, and short-term investments on the balance sheet.\n\n✅ Exceeds total debt — fortress balance sheet\n🟡 Below total debt but manageable\n🔴 Tiny vs. obligations — limited safety net",
     "total_debt":       "Total long-term financial debt.\nSustainable when well below annual Free Cash Flow × 5.\n\n✅ Well below cash & FCF\n🟡 Manageable, serviceable from earnings\n🔴 Exceeds cash + multi-year FCF",
@@ -156,8 +159,8 @@ _TIPS = {
     "dcf_growth":       "Annual Owner Earnings growth rate applied for 10 years.\nDerived conservatively from trailing revenue & EPS growth, capped by ROE quality tier:\n\n✅ High-ROIC (ROE>25%): capped at 15%\n🟡 Solid allocator (ROE>15%): capped at 12%\n⚪ Average business: capped at 8%\n\nVery high trailing growth is capped to avoid unrealistic projections.",
     "dcf_discount":     "Required annual return (discount rate) = 10%.\nAll future cash flows are divided by (1.10)^year to get today's equivalent value.\nBuffett benchmarks against 10% as the long-run US equity average.\nA higher rate would produce a lower (more conservative) intrinsic value.",
     "dcf_terminal":     "Perpetual growth rate assumed for all cash flows beyond year 10 = 2.5%.\nApproximates long-run nominal GDP growth. No business can outgrow the economy forever.\n\n⚠ Even a 0.5% change here meaningfully shifts terminal value — treat with skepticism.",
-    "dcf_ev":           "Enterprise Value = PV of 10 projected Owner Earnings years + PV of Terminal Value.\nThis is the estimated standalone business value, before accounting for cash and debt on the balance sheet.",
-    "dcf_equity":       "Equity Value = Enterprise Value + Cash − Debt.\nAdjusts the business value for what shareholders actually own after paying off debt.\nPositive net cash boosts equity value; net debt reduces it.",
+    "dcf_ev":           "Present value of projected Owner Earnings and terminal value. Owner Earnings starts from net income, so this model uses an equity cash-flow basis.",
+    "dcf_equity":       "Equity value from discounted Owner Earnings. Cash and debt are not adjusted because cash flow starts from net income; this avoids mixing equity and enterprise valuation methods.",
     "dcf_iv":           "Intrinsic Value Per Share = Equity Value ÷ Total Shares Outstanding.\nEstimated fair price based on fundamentals, not market sentiment.\n\n📌 Use as a reference range ± 20%, not a precise target.\n📌 Most accurate for stable, profitable businesses with predictable cash flows.",
     "dcf_mos":          "Margin of Safety = (Intrinsic Value − Current Price) ÷ Intrinsic Value\n\nThe discount you get vs. estimated fair value. Higher = more cushion for error.\n\n✅ > 40% — strong margin, wide buffer\n✅ 25–40% — solid buying opportunity\n🟡 15–25% — fair value zone, slim buffer\n🟡 5–15% — priced close to fair value\n🔴 < 5% or negative — no margin of safety",
     # ── Owner Earnings section ───────────────────────────────────────────────
@@ -764,6 +767,10 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
     mos_str = f"{'+' if (mos or 0) >= 0 else ''}{mos:.1f}%" if mos is not None else "N/A"
     rating_str = html.escape(snap.iv_rating or "N/A")
     iv_str = f"${snap.intrinsic_value_per_share:.2f}" if snap.intrinsic_value_per_share else "N/A"
+    iv_range = (
+        f"${snap.intrinsic_value_low:.2f}–${snap.intrinsic_value_high:.2f}"
+        if snap.intrinsic_value_low is not None and snap.intrinsic_value_high is not None else "N/A"
+    )
     price_str = f"${snap.current_price:.2f}" if snap.current_price else "N/A"
     growth_str = f"{snap.dcf_growth_rate:.1%}" if snap.dcf_growth_rate is not None else "N/A"
     growth_note = html.escape(snap.dcf_growth_note or "")
@@ -791,14 +798,16 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
       <div style="font-size:.72rem; color:var(--clr-muted); margin-bottom:10px; padding-left:2px">↳ {growth_note}</div>
       {_tr("Discount Rate", f'{snap.dcf_discount_rate:.0%}', _TIPS["dcf_discount"])}
       {_tr("Terminal Growth", f'{snap.dcf_terminal_growth:.1%}', _TIPS["dcf_terminal"])}
-      {_tr("Enterprise Value", _fmt_large(snap.dcf_enterprise_value), _TIPS["dcf_ev"])}
-      {_tr("Equity Value (+ cash − debt)", _fmt_large(snap.dcf_equity_value), _TIPS["dcf_equity"])}
+      {_tr("PV of Owner Earnings", _fmt_large(snap.dcf_enterprise_value), _TIPS["dcf_ev"])}
+      {_tr("Equity Value", _fmt_large(snap.dcf_equity_value), _TIPS["dcf_equity"])}
+      {_tr("Data limits", html.escape(snap.dcf_data_note or "N/A"), "Owner Earnings uses approximate inputs; see data note.")}
     </div>
     <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; border-left:1px solid var(--clr-border); padding-left:24px">
       <div class="has-tip" data-tip="{html.escape(_TIPS["dcf_iv"])}" style="cursor:help">
         <div style="font-size:.72rem; color:var(--clr-muted); text-transform:uppercase; letter-spacing:.07em; margin-bottom:6px">Intrinsic Value / Share</div>
         <div style="font-size:2rem; font-weight:800; color:var(--clr-accent)">{iv_str}</div>
         <div style="font-size:.8rem; color:var(--clr-muted); margin:4px 0">vs Current Price {price_str}</div>
+        <div style="font-size:.72rem; color:var(--clr-muted); margin:4px 0">Sensitivity range: {iv_range} (growth ±2pp, discount 8–12%; not a confidence interval)</div>
       </div>
       <div class="has-tip" data-tip="{html.escape(_TIPS["dcf_mos"])}" style="margin-top:16px; cursor:help">
         <div style="font-size:.72rem; color:var(--clr-muted); text-transform:uppercase; letter-spacing:.07em">Margin of Safety</div>
@@ -968,7 +977,7 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
   </div>
   <span class="proj-arrow">×</span>
   <div class="proj-step">
-    <div class="step-label">Avg PE (6m)</div>
+    <div class="step-label">6m Price/EPS Proxy</div>
     <div class="step-val">{snap.avg_pe_6m:.1f}x</div>
   </div>
   <span class="proj-arrow">=</span>
@@ -987,6 +996,14 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
 
     pe_val_html = f'<span style="color:{pe_css}">{snap.pe_ratio:.1f}x</span>' if snap.pe_ratio is not None else '<span class="na">N/A</span>'
     avg_pe_html = (f'<span class="text-yellow">{snap.avg_pe_6m:.1f}x</span><span class="text-muted" style="font-size:.72rem"> ← projection</span>' if snap.avg_pe_6m is not None else '<span class="na">N/A</span>')
+    avg_pe_3y_html = f'<span class="text-yellow">{snap.avg_pe_3y:.1f}x</span>' if snap.avg_pe_3y is not None else '<span class="na">N/A</span>'
+    hist_label, hist_color_name = pe_vs_history_label(snap.pe_vs_history_pct)
+    hist_css = _css_color(hist_color_name)
+    pe_vs_history_html = (
+        f'<span style="color:{hist_css}">{"+" if snap.pe_vs_history_pct >= 0 else ""}{snap.pe_vs_history_pct:.1f}%</span> '
+        + _badge(hist_label, hist_color_name)
+        if snap.pe_vs_history_pct is not None else '<span class="na">N/A</span>'
+    )
     inv_profile_html = f'<span style="color:{pe_css}; font-size:.78rem">{html.escape(pe_label)}</span>'
     net_cash_html = f'<span style="color:{net_cash_color}">{_fmt_large(net_cash)}</span>' if net_cash is not None else '<span class="na">N/A</span>'
     da_html = f'<span style="color:{da_css}">{da_pct:.1f}%</span> <span class="badge" style="color:{da_css}">{da_label}</span>' if da_pct is not None else '<span class="na">N/A</span>'
@@ -998,14 +1015,22 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
         if snap.sma_200 is not None and snap.pct_from_sma_200 is not None
         else '<span class="na">N/A</span>'
     )
+    warnings_html = "".join(
+        f'<div style="color:var(--clr-yellow); font-size:.8rem; margin:4px 0">Data note: {html.escape(note)}</div>'
+        for note in snap.data_warnings
+    )
 
     return f"""
+{warnings_html}
 <div class="card-grid wide">
   <!-- PE & Profile -->
   <div class="card">
     <div class="card-title"><span class="card-icon">📊</span>PE Ratio &amp; Investor Profile</div>
     {_tr("Trailing P/E",      pe_val_html,   _TIPS["pe_trailing"])}
-    {_tr("6-Month Avg P/E",   avg_pe_html,   _TIPS["avg_pe_6m"])}
+    {_tr("Price history through", html.escape(snap.price_data_through or "N/A"), "Last available adjusted daily close date used by this analysis; fundamental fields may have different reporting dates.")}
+    {_tr("6-Month Price/EPS Proxy",   avg_pe_html,   _TIPS["avg_pe_6m"])}
+    {_tr("3-Year Mean-Price P/E Proxy",    avg_pe_3y_html, _TIPS["avg_pe_3y"])}
+    {_tr("Price vs. 3Y Mean",    pe_vs_history_html, _TIPS["pe_vs_history"])}
     {_tr("Investor Profile",  inv_profile_html, _TIPS["inv_profile"])}
   </div>
 
@@ -1046,7 +1071,7 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
 <div class="card" style="margin-bottom:24px">
   <div class="card-title"><span class="card-icon">🔮</span>Valuation Projection (5+ Year View)</div>
   <p style="font-size:.8rem; color:var(--clr-muted); margin-bottom:10px">
-    Projected Earnings = Revenue Est. × Margin → Future Market Cap = Earnings × Avg P/E → Possible Return vs today
+    Single-case estimate: analyst revenue estimate × current margin × recent P/E proxy. Assumes margin and valuation multiple persist; not a price target.
   </p>
   {proj_flow}
   <div style="margin-top:16px; text-align:center" data-tip="{html.escape(_TIPS["possible_return"])}" class="has-tip" style="cursor:help">
@@ -1341,7 +1366,7 @@ def _render_comparison_table(snapshots: list[AnySnapshot]) -> str:
             ("Market Cap", lambda s: _fmt_large(s.market_cap).replace('<span class="na">N/A</span>', "N/A"), None),
             ("P/E Trailing", lambda s: f"{s.pe_ratio:.1f}x" if s.pe_ratio is not None else "N/A",
              lambda s: _score_pe(s.pe_ratio)),
-            ("6m Avg P/E", lambda s: f"{s.avg_pe_6m:.1f}x" if s.avg_pe_6m is not None else "N/A", None),
+            ("6m Price/EPS Proxy", lambda s: f"{s.avg_pe_6m:.1f}x" if s.avg_pe_6m is not None else "N/A", None),
             ("Profit Margin", lambda s: f"{s.profit_margin:.2%}" if s.profit_margin is not None else "N/A",
              lambda s: _score_margin(s.profit_margin)),
             ("Net Cash", lambda s: _fmt_large((s.total_cash or 0) - (s.total_debt or 0)).replace('<span class="na">N/A</span>', "N/A") if s.total_cash is not None and s.total_debt is not None else "N/A", None),

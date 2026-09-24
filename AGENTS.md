@@ -303,8 +303,8 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | 3 | Growth Rate — conservative: avg(revenue_growth, eps_growth) capped by ROE tier |
 | 4 | Discount Rate = 10% |
 | 5 | Terminal Growth = 2.5% |
-| 6 | Enterprise Value = PV(10yr OE) + PV(Terminal Value) |
-| 7 | Equity Value = EV + Cash − Debt |
+| 6 | Present Value of Owner Earnings = PV(10yr OE) + PV(Terminal Value) |
+| 7 | Equity Value = PV of Owner Earnings (cash flows start from net income; do not add cash/subtract debt) |
 | 8 | Intrinsic Value Per Share = Equity Value / Shares Outstanding |
 | 9 | Margin of Safety = (IV − Price) / IV × 100 |
 | 10 | Rating based on margin of safety |
@@ -331,7 +331,11 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 3. Else if NI > 0 → NI used as fallback
 4. If none positive → DCF section shows "insufficient data"
 
-**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
+**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The report names the PV and equity value accordingly. It surfaces when FCF or net income proxies are used, and notes that latest-year D&A/total CapEx are combined with forecast net income and working-capital changes are not included. A per-share sensitivity range uses growth ±2 percentage points and discount rates of 8%/12%; it is a model sensitivity, not a confidence interval.
+
+**Historical P/E context:** This valuation path does not use historical EPS. Its 6-month and 3-year values therefore use mean historical price divided by current trailing EPS and must be labeled as price/current-EPS proxies, never as historical P/E. The 3-year price data end date is shown so users can judge price-data freshness. Do not present this proxy as a decisive valuation signal without making the limitation visible.
+
+**Additional information fields on `ValuationSnapshot`:** `price_data_through`, `data_warnings`, `dcf_data_note`, `intrinsic_value_low`, and `intrinsic_value_high`, alongside the DCF inputs and outputs above.
 
 ## Quick Value Check (`stocktool value`)
 
@@ -485,6 +489,7 @@ Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks yo
 - Beta: green < 1, yellow 1-1.5, red > 1.5
 - Return: green >= 2%, yellow 1-2%, dim < 1%
 - Annualized: green >= 12%, yellow 6-12%, dim < 6%
+- Bid-ask spread is shown as an execution/liquidity context measure; quote snapshots can change quickly.
 
 ## Rebalancing Logic
 
@@ -506,3 +511,13 @@ Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks yo
 
 ***Consideration***
 When new feature is added please update the AGENTS.md documentation with the principles to consider as help for future feature
+
+### Information Quality Principles
+
+- Show the period/date and source for time-sensitive data when available; distinguish the price-history end date from fundamental statement/reporting dates.
+- Distinguish unavailable data from a failed fetch or a proxy calculation. Surface coverage, substitutions, and assumptions next to derived metrics.
+- Label trailing, forward, historical, and proxy values precisely. Do not imply historical fundamentals when a calculation reuses today's values.
+- Pair point forecasts with explicit assumptions and a sensitivity range when the model supports it; label sensitivity as scenarios, not statistical confidence.
+- Preserve the cash-flow basis in valuation math. Do not combine equity cash flows with enterprise-value adjustments.
+- For options, display quote liquidity context (including bid-ask spread) and clarify that annualized premium is a rate extrapolation, not an expected return.
+- Portfolio time-weighted or benchmark-relative performance requires dated cash flows/trades and dividend handling; do not infer it from current shares and average cost alone.
