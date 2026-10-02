@@ -30,21 +30,24 @@ stocktool/
 │                   No external deps (stdlib only + existing packages). Inline CSS dark theme,
 │                   card grid layout, color-coded badges, SVG bar charts, tab-based multi-ticker nav.
 ├── analysis.py   — FundamentalSnapshot + ValuationSnapshot + ValueCheckSnapshot +
-│                   CashSecuredPutSnapshot + OwnerEarningsSnapshot dataclasses,
+│                   CashSecuredPutSnapshot + OwnerEarningsSnapshot + LeapsSnapshot dataclasses,
 │                   build_snapshot(), build_valuation_snapshot(), build_value_check_snapshot(),
-│                   build_owner_earnings_snapshot(), build_csp_snapshot(), score_ticker()
+│                   build_owner_earnings_snapshot(), build_csp_snapshot(), build_leaps_snapshot(), score_ticker()
 ├── portfolio.py  — Position/Portfolio/PortfolioSnapshot dataclasses,
 │                   load/save with auto-routing (Google Sheets → JSON fallback)
+├── leaps.py      — LeapsPosition/LeapsBook dataclasses, load_leaps()/save_leaps()
+│                   (local JSON only — no Sheets routing, unlike portfolio.py)
 ├── sheets.py     — Google Sheets CRUD: load_portfolio_from_sheet,
 │                   save_portfolio_to_sheet, sync_position, remove_position_from_sheet
 ├── display.py    — Rich table/panel renderers + render_pie_chart() +
 │                   render_etf_compare() + render_dip_alert() +
 │                   render_portfolio_overlap() + render_value_check() +
-│                   render_cash_secured_puts() + render_owner_earnings() (zero business logic)
-└── cli.py        — Typer app + subcommands; calls data → analysis/portfolio → display
+│                   render_cash_secured_puts() + render_owner_earnings() +
+│                   render_leaps_list() + render_leaps_detail() (zero business logic)
+└── cli.py        — Typer app + subcommands; calls data → analysis/portfolio/leaps → display
 ```
 
-**Dependency direction**: `config → data/analysis/portfolio/sheets → cli`; `display` only imported by `cli`; `html_report` only imported by `cli` (lazy, on --html flag).
+**Dependency direction**: `config → data/analysis/portfolio/leaps/sheets → cli`; `display` only imported by `cli`; `html_report` only imported by `cli` (lazy, on --html flag).
 
 ## HTML Report Export (`--html`)
 
@@ -153,6 +156,11 @@ stocktool etf valuation VOO QQQM [--html]
 stocktool strategy dip [--sma-days 200]
 stocktool strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
 stocktool strategy margin [AMOUNT] [--reset]
+stocktool leaps add
+stocktool leaps list [--all] [--closed]
+stocktool leaps show ID|TICKER
+stocktool leaps update ID|TICKER
+stocktool leaps remove ID|TICKER
 stocktool docs
 ```
 
@@ -531,6 +539,91 @@ Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks yo
 - Beta: green < 1, yellow 1-1.5, red > 1.5
 - Return: green >= 2%, yellow 1-2%, dim < 1%
 - Annualized: green >= 12%, yellow 6-12%, dim < 6%
+
+## LEAPS Tracking (`stocktool leaps`)
+
+Discipline-enforcing tracker for LEAPS (Long-term Equity AnticiPation Securities) positions — long-dated, deep-ITM options held as a stock substitute. `leaps add` is an interactive wizard that is a checklist, not just data entry: it blocks or warns on the same rules a disciplined LEAPS trader would self-impose before committing capital to a position that can go to zero.
+
+**Scope of this implementation (MVP):** `add` (wizard), `list`, `show <id|ticker>`, `update <id|ticker>` (monitoring refresh), `remove <id|ticker>`. Core calculations only — breakeven, days-to-expiry, position sizing, a delta-based theoretical P&L from entry Greeks, a delta-adjusted stock-equivalent exposure view, an at-expiration scenario ladder, and a cross-check against the existing valuation engine. **Deferred to future phases:** Black-Scholes Greeks calculation (delta/theta are still entered manually, read off your broker's live option chain — this tool never computes delta itself), IV rank/history tracking, `leaps check` / `leaps alerts` / `leaps analyze`, email/SMTP notifications, live earnings-date fetching, and a Google Sheets backend for LEAPS.
+
+**Data model (`leaps.py`):** `LeapsPosition` — `id` (8-char uuid), `ticker`, `option_type` (CALL/PUT), `strike`, `expiration`, `premium`, `contracts`, entry snapshot (`entry_date`, `entry_stock_price`, `entry_delta`/`entry_theta`/`entry_iv` — all optional), exit rules (`profit_target_multiplier`, `days_before_expiry_exit`), and close tracking (`status`, `closed_at`, `close_price`, `realized_pnl`). Dates are stored as ISO strings, not `date` objects, so the dataclass serializes with plain `dataclasses.asdict()` + `json.dump()` — no custom encoder needed.
+
+**Persistence:** local JSON only at `~/.config/stocktool/leaps.json` (`load_leaps()`/`save_leaps()`). Unlike `portfolio.py`, there is **no Google Sheets routing** for LEAPS — a deliberate simplification for this MVP, not an oversight.
+
+**`leaps remove` closes, it doesn't delete** — status flips to CLOSED (optionally recording a close price and realized P&L) so closed positions remain visible via `leaps list --closed` / `--all`. This preserves a track record of past LEAPS trades. Closing an already-closed position is a no-op, not an error.
+
+**`leaps show` / `leaps remove` accept a ticker, not just the 8-char position id** (`cli._resolve_leaps_position()`): the raw argument is tried as an exact id first (backward compatible with ids already written to scripts/history), then as a case-insensitive ticker match against both active and closed positions. A single ticker match resolves silently; 2+ matches (e.g. two LEAPS tranches on the same name) render a numbered picker table (`display.render_leaps_candidates()`) and prompt for a choice via `_ask_int` — avoiding the need to copy/paste an opaque uuid for the common case of one position per ticker.
+
+**Wizard rules (`leaps add`):**
+
+| Rule | Threshold | Enforcement |
+|------|-----------|-------------|
+| Approved tickers | `LEAPS_APPROVED_TICKERS` config (default: GOOGL, AMZN, MSFT; override via `LEAPS_APPROVED_TICKERS` env, comma-separated) | Hard block, no override |
+| Minimum days to expiry | 365 | Hard block, no override |
+| Long expiry | > 730 days | Warn only |
+| Delta band | 0.70 – 0.90 | Warn only (manually entered — no Greeks engine yet) |
+| Delta sweet spot | 0.75 – 0.85 ("Jorge's Rule") | Highlighted green — balanced leverage, the value-investor target band |
+| Position size | > 3% of portfolio | Warn only |
+| Position size | > 5% of portfolio | Warn + explicit y/N override |
+| Earnings proximity | Next earnings within `LEAPS_EARNINGS_WARN_DAYS` (default 21) days | Warn only |
+
+**Market context step (Step 4b, right after strike + expiration are entered):** `data.fetch_leaps_option_context(ticker, option_type, strike, expiration)` makes a best-effort, never-raising fetch of three pieces of market data for the exact contract the user is about to enter, since the wizard is meant to be run immediately before the real broker order is submitted:
+
+- **Next earnings date** — from `ticker.calendar["Earnings Date"]`, falling back to `ticker.get_earnings_dates(limit=4)` filtered to future dates. Warned (yellow) if within `LEAPS_EARNINGS_WARN_DAYS` (default 21, override via `LEAPS_EARNINGS_WARN_DAYS` env) — an entry that close to earnings risks a post-earnings IV crush and gap move. Green if clear, dim "not available" if yfinance returns nothing.
+- **Bid/ask → suggested limit price** — the exact contract's `bid`/`ask` from `ticker.option_chain(expiration)` (`.calls`/`.puts` filtered by `strike`), midpoint rounded to the cent becomes the suggested order limit, shown as the **default** for the Step 5 premium prompt (accept it, or override with the actual fill price). "No matching contract" if the strike/expiration pair isn't in the chain.
+- **IV vs. 1-year realized volatility** — yfinance has no historical-average-IV series (same gap already solved for ETF P/E — see the FMP section above), so this reuses that proxy philosophy: the contract's `impliedVolatility` from the option chain is compared against the stock's own trailing 1-year realized volatility (annualized stdev of daily log returns from `ticker.history(period="1y")`). IV/RV ratio > 1.3 → red ("running rich — relatively expensive right now"), < 0.9 → green ("reasonably priced"), otherwise yellow ("modestly elevated — typical for LEAPS"). Re-displayed as a dim reminder right before the existing Step 8 IV-at-purchase prompt so there's a reference figure to type against. This is a volatility-pricing signal, not a historical-IV-percentile — the note always says "vs realized volatility," never "vs average IV," to avoid overclaiming what's actually being measured.
+
+**Input validation (`cli._ask_float` / `cli._ask_int`):** every numeric wizard prompt (strike, premium, contracts, delta, theta, IV, portfolio value, profit target multiplier, time-stop days) goes through one of these two helpers instead of bare `FloatPrompt`/`IntPrompt`/manual `float()`. Each shows an inline example value (`[dim](e.g. 450.00)[/dim]`), strips thousands-separator commas before parsing, and on a malformed or out-of-range entry prints a red error message and **re-prompts** rather than raising an exception or calling `typer.Exit()` — a typo no longer aborts the whole wizard after several minutes of answered questions.
+
+**Position sizing auto-sourced from the tracked portfolio:** rather than re-prompting for a portfolio total each run (as the original design sketch did), the wizard reuses `portfolio.load_portfolio()` + `portfolio.build_portfolio_snapshot()`'s `total_market_value` — the same machinery `portfolio show` uses. Falls back to a manual prompt only if no portfolio is tracked. `leaps list`/`leaps show` use the same best-effort lookup but never prompt — position size shows "N/A" if unavailable, since those are non-interactive commands.
+
+**Formulas (`analysis.py`'s `build_leaps_snapshot()`):**
+
+```
+Breakeven              = strike + premium                         (CALL)
+                        = strike - premium                         (PUT)
+Days to Expiry          = expiration - today
+Position %              = (contracts × premium × 100) / portfolio_value × 100
+Theoretical Value        = premium + (current_price - entry_stock_price) × Effective Delta   [requires entry_delta or current_delta]
+Theoretical P&L          = (Theoretical Value - premium) × 100 × contracts
+Profit %                 = (Theoretical Value - premium) / premium × 100
+Accumulated Theta        = days_held × |Effective Theta| × 100 × contracts                   [requires entry_theta or current_theta]
+```
+
+Where `Effective Delta` / `Effective Theta` = `current_delta`/`current_theta` if set (via `leaps update`), else `entry_delta`/`entry_theta` — same fallback as `Effective Delta` in the Stock-Equivalent Exposure section below. Theoretical P&L is a simple delta-based estimate, not a live option quote — Greeks that are left blank at `add` time (and never filled in via `leaps update`) leave the corresponding downstream fields as "N/A" rather than erroring.
+
+**Color thresholds:** Days-to-expiry — red once inside the 90-day default time-stop window (`LEAPS_DEFAULT_TIME_STOP_DAYS`), else green. Profit % — green at/above the position's profit target (`(profit_target_multiplier - 1) × 100`), yellow while positive but below target, red when negative. Delta (`analysis.leaps_delta_color()`) — green in the 0.75–0.85 sweet spot, yellow in the 0.70–0.90 warn band outside that spot, red/dim otherwise.
+
+**Monitoring: `stocktool leaps update <id|ticker>`** — the LEAPS tutorial's own framing is that once a position is opened, "it's all about monitoring to follow exit strategy." This command re-prompts for current delta/theta/IV (same `cli._ask_float` pattern as the wizard, pre-filled with the last known reading) and stores them as `current_delta`/`current_theta`/`current_iv`/`last_updated` on `LeapsPosition` — fields distinct from the fixed `entry_*` snapshot. **Running `leaps update` recalculates Theoretical Value/P&L/Profit %/Accumulated Theta using the fresh `current_delta`/`current_theta`** (falling back to `entry_delta`/`entry_theta` only when no update has been recorded) — these are a present-day read of the position, not a value frozen at entry, so they move as the Greeks drift. (An earlier version of this tool pinned these fields to `entry_delta`/`entry_theta` permanently; that was corrected because a disciplined LEAPS monitor needs the table to reflect what the position is worth *today*, not on day one.) `leaps show` still displays entry vs. current Greeks side by side so the drift itself is visible at a glance. Running `leaps update` is manual (no live option-Greeks feed exists in this tool — see the deferred Black-Scholes item above); it's meant to be run whenever you recheck a position against your exit rules.
+
+**Stock-Equivalent Exposure (the "LEAPS behaves as stock" view):** added directly from the project's own LEAPS tutorial — a deep-ITM LEAPS is deliberately used as a stock substitute on highest-conviction names, so the tool should surface *actual* market exposure, not just cash-at-risk. New `LeapsSnapshot` fields, computed in `build_leaps_snapshot()`:
+
+```
+Effective Delta          = current_delta if set (via `leaps update`), else entry_delta
+Effective Shares         = Effective Delta × 100 × contracts
+Effective Exposure       = Effective Shares × current_stock_price
+Effective Position %     = Effective Exposure / portfolio_value × 100
+Leverage Ratio           = (Effective Delta × current_stock_price) / Theoretical Value
+```
+
+`Leverage Ratio` is the standard option-leverage/elasticity formula (reuses `theoretical_current_value` already computed — no new calculation path) — "a 1% stock move is ~N% on this position." It mathematically confirms the tutorial's own claim: as delta rises toward 1 (deeper ITM), leverage falls toward the stock's own 1:1 behavior, while a shallower delta means more speculative leverage. `Effective Position %` is deliberately shown next to the existing cash-based `position_pct` — a position can pass the 5% *cash* sizing rule in the wizard while still carrying a larger *market* exposure than that cash figure implies, and that gap is exactly what this surfaces.
+
+Color thresholds: `analysis.leaps_leverage_color()` — green ≤4x (solidly stock-like), yellow 4–7x (typical deep-ITM LEAPS), red >7x (drifted into speculative, low-delta territory — recheck with `leaps update`). `analysis.leaps_exposure_color()` reuses the wizard's own `LEAPS_WARN_POSITION_PCT`/`LEAPS_MAX_POSITION_PCT` bands (3%/5%) applied to `effective_position_pct` instead of cash. `leaps list`'s summary panel flags any active position whose delta has drifted red or whose leverage has crossed 7x, so multi-position monitoring doesn't require opening each one with `leaps show`.
+
+**Value-investor cross-check:** both `leaps add` (right after the ticker is approved) and `leaps show` call `cli._render_leaps_value_check()`, which reuses the *exact same engine* as `stocktool valuation` — `analysis.build_valuation_snapshot()` fed by `data.fetch_fundamentals`, `fetch_price_history` (180-day), `fetch_revenue_estimates`, `fetch_balance_sheets`, and `fetch_cashflow_basics`. It surfaces `possible_return_pct` (colored via the new `analysis.possible_return_verdict()`, mirroring the thresholds already used in `display.render_valuation`: ≥50% strong, 15–50% moderate, 0–15% limited, <0% downside) and the DCF `margin_of_safety_pct`/`iv_rating`/`iv_rating_color` fields. This is a pure cross-check, not a gate — it never blocks the wizard, it only informs. **`fetch_cashflow_basics` is required here**, not optional: without it, `build_valuation_snapshot`'s DCF step falls back to a raw `freeCashflow` proxy that can be wildly wrong (observed on AMZN: −2316% "Overvalued" instead of the correct +21.7% "Fair Value") — always fetch it alongside the other four calls for this cross-check.
+
+**Scenario Analysis (at-expiration P&L ladder):** `analysis.build_leaps_scenario()` (used by both `leaps add`'s confirmation step and `leaps show`) computes a pure-math, no-Greeks-required table of intrinsic value / P&L / return at a spread of hypothetical expiration prices, plus:
+
+```
+Intrinsic (CALL) = max(0, price - strike) × 100 × contracts
+Intrinsic (PUT)  = max(0, strike - price) × 100 × contracts
+P&L              = Intrinsic - (premium × 100 × contracts)
+Return %         = P&L / (premium × 100 × contracts) × 100
+```
+
+Price points are generated from a fixed set of multipliers on the current (or entry) stock price — `[0.7, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6]` for CALLs, the mirrored descending set for PUTs — plus the strike and breakeven always inserted explicitly, deduped and sorted. "Key Levels" states the 100%-loss threshold, breakeven, and the % move (with direction — "rise" for CALL, "fall" for PUT) needed to break even within the remaining days-to-expiry (shown in months). Two named "+20% / +40% move" scenarios are included as a quick gut-check.
+
+**Early-exit estimate:** reuses the same linear delta approximation as `LeapsSnapshot.theoretical_current_value` (not a new pricing model) — solves `premium + (price - entry_stock_price) × Effective Delta = premium × profit_target_multiplier` for the required stock price, where `Effective Delta` is `current_delta` if set via `leaps update`, else `entry_delta` (same fallback as everywhere else). This **ignores time decay (theta)** entirely and is explicitly labeled a rough guide, not a precise target; it's `None` (with an explanatory message) if neither `current_delta` nor `entry_delta` was recorded. The accompanying "Warning Signs" panel reminds the user to check current IV rank and the next earnings date manually (neither is fetched by this tool) and restates the time-stop date (`expiration − days_before_expiry_exit`).
 
 ## Rebalancing Logic
 

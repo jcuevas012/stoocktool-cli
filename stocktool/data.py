@@ -706,6 +706,79 @@ def fetch_put_candidates(
     return results
 
 
+def fetch_leaps_option_context(
+    ticker: str, option_type: str, strike: float, expiration: str
+) -> dict:
+    """Best-effort market context for the `leaps add` wizard: the chosen contract's
+    bid/ask/IV, the next earnings date, and 1-year realized volatility.
+
+    Returns a dict with any subset of {"bid", "ask", "mid", "implied_volatility",
+    "earnings_date", "days_to_earnings", "realized_volatility"} — missing keys mean
+    that piece could not be fetched. Never raises; this is supplementary context for
+    a manual-entry wizard, not a hard data requirement.
+    """
+    from datetime import date, datetime
+
+    result: dict = {}
+    t = yf.Ticker(ticker)
+
+    # Contract bid/ask/IV for the exact strike + expiration the user already chose.
+    try:
+        chain = t.option_chain(expiration)
+        contracts_df = chain.calls if option_type == "CALL" else chain.puts
+        row = contracts_df[contracts_df["strike"] == strike]
+        if not row.empty:
+            row = row.iloc[0]
+            bid = _safe_float(row.get("bid"))
+            ask = _safe_float(row.get("ask"))
+            if bid is not None:
+                result["bid"] = bid
+            if ask is not None:
+                result["ask"] = ask
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                result["mid"] = round((bid + ask) / 2, 2)
+            iv = _safe_float(row.get("impliedVolatility"))
+            if iv is not None:
+                result["implied_volatility"] = iv * 100  # fraction -> percent
+    except Exception:
+        pass
+
+    # Next earnings date.
+    try:
+        earnings_date = None
+        cal = t.calendar
+        if isinstance(cal, dict) and cal.get("Earnings Date"):
+            earnings_date = cal["Earnings Date"][0]
+        if earnings_date is None:
+            edf = t.get_earnings_dates(limit=4)
+            if edf is not None and not edf.empty:
+                future = edf[edf.index.date >= date.today()]
+                if not future.empty:
+                    earnings_date = future.index[-1].date()
+        if earnings_date is not None:
+            if isinstance(earnings_date, datetime):
+                earnings_date = earnings_date.date()
+            result["earnings_date"] = earnings_date.isoformat()
+            result["days_to_earnings"] = (earnings_date - date.today()).days
+    except Exception:
+        pass
+
+    # 1-year realized (historical) volatility — annualized stdev of daily log returns.
+    # Proxy for "average IV": yfinance has no historical implied-volatility series.
+    try:
+        import numpy as np
+
+        hist = t.history(period="1y")
+        if not hist.empty and len(hist) > 5:
+            log_returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+            realized_vol = float(log_returns.std() * (252 ** 0.5))
+            result["realized_volatility"] = realized_vol * 100  # fraction -> percent
+    except Exception:
+        pass
+
+    return result
+
+
 def _days_to_period(days: int) -> str:
     if days <= 5:
         return "5d"

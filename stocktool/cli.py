@@ -22,6 +22,9 @@ app.add_typer(etf_app, name="etf")
 strategy_app = typer.Typer(help="Investment strategy commands.", no_args_is_help=True)
 app.add_typer(strategy_app, name="strategy")
 
+leaps_app = typer.Typer(help="LEAPS options tracking commands.", no_args_is_help=True)
+app.add_typer(leaps_app, name="leaps")
+
 console = Console()
 
 
@@ -773,6 +776,545 @@ def strategy_puts(
 
 
 # ---------------------------------------------------------------------------
+# stocktool leaps add
+# ---------------------------------------------------------------------------
+
+def _leaps_portfolio_value() -> Optional[float]:
+    """Best-effort total portfolio market value, reusing the tracked portfolio."""
+    from . import data
+    from .portfolio import load_portfolio, build_portfolio_snapshot
+
+    portfolio = load_portfolio()
+    if not portfolio.positions:
+        return None
+    tickers = portfolio.tickers()
+    prices = data.get_current_prices(tickers)
+    sector_map = {t: None for t in tickers}
+    snapshot = build_portfolio_snapshot(portfolio, prices, sector_map)
+    return snapshot.total_market_value or None
+
+
+def _leaps_quick_valuation(ticker: str):
+    """Best-effort cross-check against the value-investing engine (`stocktool valuation`'s logic).
+
+    Returns None on any fetch/build failure rather than raising — this is a supplementary
+    check inside the LEAPS wizard, not a hard requirement to proceed.
+    """
+    from . import data, analysis
+
+    try:
+        fundamentals = data.fetch_fundamentals([ticker])
+        history_6m = data.fetch_price_history([ticker], horizon_days=180)
+        revenue_estimates = data.fetch_revenue_estimates([ticker])
+        balance_sheets = data.fetch_balance_sheets([ticker])
+        # cashflow_basics (D&A + CapEx) is required for the DCF step — without it,
+        # build_valuation_snapshot falls back to a raw `freeCashflow` proxy that can be
+        # wildly wrong (observed: AMZN -2316% "Overvalued" vs the correct +21.6% "Fair Value").
+        cashflow_basics = data.fetch_cashflow_basics([ticker])
+        return analysis.build_valuation_snapshot(
+            ticker, fundamentals.get(ticker, {}), history_6m,
+            revenue_estimates.get(ticker), balance_sheets.get(ticker, {}),
+            cashflow_basics.get(ticker, {}),
+        )
+    except Exception:
+        return None
+
+
+def _render_leaps_value_check(ticker: str) -> None:
+    from . import analysis
+
+    with console.status(f"Cross-checking {ticker} against the value-investing screen..."):
+        valuation = _leaps_quick_valuation(ticker)
+    if valuation is None:
+        console.print("[dim]Could not fetch valuation data for cross-check.[/dim]")
+        return
+    pr_color, pr_label = analysis.possible_return_verdict(valuation.possible_return_pct)
+    pr_str = f"{valuation.possible_return_pct:+.1f}%" if valuation.possible_return_pct is not None else "N/A"
+    console.print(f"[bold]Value check:[/bold] possible return [{pr_color}]{pr_str}[/{pr_color}] ({pr_label})")
+    if valuation.margin_of_safety_pct is not None:
+        mos_color = valuation.iv_rating_color or "dim"
+        console.print(
+            f"  DCF margin of safety: [{mos_color}]{valuation.margin_of_safety_pct:+.1f}%[/{mos_color}]"
+            f" — {valuation.iv_rating}"
+        )
+    console.print(f"[dim]Full detail: stocktool valuation {ticker}[/dim]")
+
+
+def _prompt_expiration() -> "date":
+    from datetime import date
+    from rich.prompt import Prompt
+
+    while True:
+        raw = Prompt.ask("Expiration date (YYYY-MM-DD) [dim](e.g. 2027-06-18)[/dim]")
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            console.print("[red]Invalid date — use YYYY-MM-DD format, e.g. 2027-06-18.[/red]")
+
+
+def _ask_float(
+    label: str,
+    example: str,
+    default: Optional[float] = None,
+    optional: bool = False,
+    min_value: Optional[float] = None,
+) -> Optional[float]:
+    """Prompt for a float with an inline example, a comma-tolerant parser, and a
+    retry-on-invalid loop instead of crashing the wizard on bad input."""
+    from rich.prompt import Prompt
+
+    suffix = " (optional)" if optional else ""
+    prompt_text = f"{label}{suffix} [dim](e.g. {example})[/dim]"
+    while True:
+        raw = Prompt.ask(prompt_text, default="" if default is None else str(default))
+        if optional and not raw.strip():
+            return None
+        cleaned = raw.strip().replace(",", "")
+        try:
+            value = float(cleaned)
+        except ValueError:
+            console.print(f"[red]Invalid number — enter digits only, e.g. {example}[/red]")
+            continue
+        if min_value is not None and value < min_value:
+            console.print(f"[red]Value must be at least {min_value}.[/red]")
+            continue
+        return value
+
+
+def _ask_int(
+    label: str,
+    example: str,
+    default: Optional[int] = None,
+    min_value: Optional[int] = None,
+) -> int:
+    """Prompt for an int with an inline example, a comma-tolerant parser, and a
+    retry-on-invalid loop instead of crashing the wizard on bad input."""
+    from rich.prompt import Prompt
+
+    prompt_text = f"{label} [dim](e.g. {example})[/dim]"
+    while True:
+        raw = Prompt.ask(prompt_text, default=None if default is None else str(default))
+        cleaned = raw.strip().replace(",", "")
+        try:
+            value = int(cleaned)
+        except ValueError:
+            console.print(f"[red]Invalid whole number — enter digits only, e.g. {example}[/red]")
+            continue
+        if min_value is not None and value < min_value:
+            console.print(f"[red]Value must be at least {min_value}.[/red]")
+            continue
+        return value
+
+
+def _resolve_leaps_position(book, identifier: str):
+    """Resolve a user-supplied `leaps show`/`leaps remove` argument to a position.
+
+    Tries an exact position-id match first (backward compatible with existing ids),
+    then falls back to a case-insensitive ticker match. Prompts for a choice when a
+    ticker matches more than one position, since ids are hard to remember/type.
+    """
+    from . import display
+
+    position = book.find(identifier)
+    if position is not None:
+        return position
+
+    matches = [p for p in book.positions if p.ticker.upper() == identifier.upper()]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+
+    display.render_leaps_candidates(matches)
+    choice = _ask_int(f"Which {identifier.upper()} position", "1", default=1, min_value=1)
+    while choice > len(matches):
+        console.print(f"[red]Enter a number between 1 and {len(matches)}.[/red]")
+        choice = _ask_int(f"Which {identifier.upper()} position", "1", default=1, min_value=1)
+    return matches[choice - 1]
+
+
+@leaps_app.command("add")
+def leaps_add() -> None:
+    """Interactive wizard to add a new LEAPS position, enforcing position-discipline rules."""
+    from datetime import date
+    from rich.prompt import Prompt, Confirm
+
+    from . import data, analysis, display
+    from .config import (
+        LEAPS_APPROVED_TICKERS, LEAPS_MIN_DAYS_TO_EXPIRY, LEAPS_LONG_EXPIRY_WARN_DAYS,
+        LEAPS_DELTA_WARN_LOW, LEAPS_DELTA_WARN_HIGH, LEAPS_MAX_POSITION_PCT,
+        LEAPS_WARN_POSITION_PCT, LEAPS_DEFAULT_PROFIT_TARGET, LEAPS_DEFAULT_TIME_STOP_DAYS,
+        LEAPS_EARNINGS_WARN_DAYS,
+    )
+    from .leaps import LeapsPosition, load_leaps, save_leaps, new_position_id
+
+    console.print("\n[bold]LEAPS Wizard — Add New Position[/bold]")
+    console.print("=" * 32)
+
+    # Step 1: ticker
+    ticker = Prompt.ask(f"Ticker symbol ({', '.join(LEAPS_APPROVED_TICKERS)} only — high conviction)").strip().upper()
+    if ticker not in LEAPS_APPROVED_TICKERS:
+        console.print(f"[red]❌ {ticker} is not in the approved LEAPS ticker list ({', '.join(LEAPS_APPROVED_TICKERS)}).[/red]")
+        raise typer.Exit(1)
+
+    with console.status(f"Fetching current price for {ticker}..."):
+        current_price = data.get_current_prices([ticker]).get(ticker)
+    if not current_price:
+        console.print(f"[red]Could not fetch a current price for {ticker}.[/red]")
+        raise typer.Exit(1)
+    console.print(f"✓ Current price: [bold]${current_price:.2f}[/bold]")
+    _render_leaps_value_check(ticker)
+
+    # Step 2: option type
+    option_type = Prompt.ask("CALL or PUT?", choices=["CALL", "PUT"], default="CALL")
+    if option_type == "CALL":
+        console.print("[dim]LEAPS are typically CALLS for bullish positions.[/dim]")
+
+    # Step 3: strike price
+    strike = _ask_float("Strike price ($)", example="450.00", min_value=0.01)
+    itm_pct = (
+        (current_price - strike) / current_price * 100
+        if option_type == "CALL"
+        else (strike - current_price) / current_price * 100
+    )
+    if itm_pct < 10:
+        console.print(f"[yellow]⚠️ Strike is {itm_pct:.1f}% in-the-money — not deep ITM. LEAPS rules suggest 15%+ ITM.[/yellow]")
+    else:
+        console.print(f"✓ Strike is {itm_pct:.1f}% in-the-money")
+
+    # Step 4: expiration date
+    expiration = _prompt_expiration()
+    days_to_expiry = (expiration - date.today()).days
+    if days_to_expiry < LEAPS_MIN_DAYS_TO_EXPIRY:
+        console.print(f"[red]❌ LEAPS rule: minimum {LEAPS_MIN_DAYS_TO_EXPIRY} days to expiry (got {days_to_expiry}).[/red]")
+        raise typer.Exit(1)
+    if days_to_expiry > LEAPS_LONG_EXPIRY_WARN_DAYS:
+        console.print(f"[yellow]⚠️ Very long expiry ({days_to_expiry} days) increases vega risk.[/yellow]")
+    console.print(f"✓ {days_to_expiry} days to expiration (passes {LEAPS_MIN_DAYS_TO_EXPIRY}-day minimum)")
+
+    # Step 4b: market context — next earnings date, bid/ask, IV vs 1Y realized volatility.
+    # Best-effort only: this wizard is meant to be run right before you submit the real
+    # order, so these are advisory checks, not blockers.
+    with console.status(f"Fetching option market context for {ticker}..."):
+        option_context = data.fetch_leaps_option_context(
+            ticker, option_type, strike, expiration.isoformat()
+        )
+
+    days_to_earnings = option_context.get("days_to_earnings")
+    if days_to_earnings is not None:
+        earnings_str = f"{option_context['earnings_date']} ({days_to_earnings} days away)"
+        if 0 <= days_to_earnings <= LEAPS_EARNINGS_WARN_DAYS:
+            console.print(
+                f"[yellow]⚠️ Next earnings: {earnings_str} — within the {LEAPS_EARNINGS_WARN_DAYS}-day "
+                f"warn window. Expect an IV crush and a possible gap move right after you enter.[/yellow]"
+            )
+        else:
+            console.print(f"[green]✓ Next earnings: {earnings_str}[/green]")
+    else:
+        console.print("[dim]Next earnings date not available.[/dim]")
+
+    suggested_premium = option_context.get("mid")
+    bid, ask = option_context.get("bid"), option_context.get("ask")
+    if bid is not None and ask is not None:
+        if suggested_premium is not None:
+            console.print(
+                f"Market bid/ask: ${bid:.2f} / ${ask:.2f} → suggested limit (mid): ${suggested_premium:.2f}"
+            )
+        else:
+            console.print(f"Market bid/ask: ${bid:.2f} / ${ask:.2f}")
+    else:
+        console.print("[dim]No matching contract found for this strike/expiration — enter premium manually.[/dim]")
+
+    market_iv = option_context.get("implied_volatility")
+    realized_vol = option_context.get("realized_volatility")
+    if market_iv is not None and realized_vol:
+        iv_ratio = market_iv / realized_vol
+        if iv_ratio > 1.3:
+            iv_color, iv_note = "red", "running rich vs. realized vol — options are relatively expensive right now"
+        elif iv_ratio < 0.9:
+            iv_color, iv_note = "green", "near or below realized vol — reasonably priced"
+        else:
+            iv_color, iv_note = "yellow", "modestly elevated vs. realized vol — typical for LEAPS"
+        console.print(
+            f"[{iv_color}]Market IV: {market_iv:.1f}% vs 1Y realized volatility {realized_vol:.1f}% "
+            f"({iv_ratio - 1:+.0%}) — {iv_note}[/{iv_color}]"
+        )
+    elif market_iv is not None:
+        console.print(f"Market IV: {market_iv:.1f}% [dim](realized volatility unavailable for comparison)[/dim]")
+
+    # Step 5: premium + contracts
+    premium_example = f"{suggested_premium:.2f}" if suggested_premium is not None else "12.70"
+    premium = _ask_float(
+        "Premium paid per share ($)", example=premium_example, default=suggested_premium, min_value=0.01
+    )
+    contracts = _ask_int("Contracts", example="2", default=1, min_value=1)
+    total_cost = premium * 100 * contracts
+    breakeven = strike + premium if option_type == "CALL" else strike - premium
+    console.print(f"Total cost: ${total_cost:,.2f}")
+    console.print(f"Breakeven: ${breakeven:.2f}")
+
+    # Step 6: delta at purchase (optional) — read off your broker's chain, not computed here
+    entry_delta = _ask_float(
+        "Delta at purchase (0.00-1.00, read from your broker's option chain)",
+        example="0.80", optional=True,
+    )
+    if entry_delta is not None:
+        color = analysis.leaps_delta_color(entry_delta)
+        if entry_delta < LEAPS_DELTA_WARN_LOW:
+            console.print(f"[yellow]⚠️ Below {LEAPS_DELTA_WARN_LOW} delta is not deep ITM — higher risk.[/yellow]")
+        elif entry_delta > LEAPS_DELTA_WARN_HIGH:
+            console.print(f"[yellow]⚠️ Above {LEAPS_DELTA_WARN_HIGH} delta is very deep ITM — expensive, lower leverage.[/yellow]")
+        elif color == "green":
+            console.print(f"[green]✓ Delta {entry_delta:.2f} — Jorge's Rule sweet spot (0.75-0.85): balanced leverage for value investors.[/green]")
+        else:
+            console.print(f"[yellow]Delta {entry_delta:.2f} is deep ITM but outside the 0.75-0.85 sweet spot.[/yellow]")
+
+    # Step 7: theta at purchase (optional)
+    theta_magnitude = _ask_float("Theta per day (magnitude $)", example="0.03", optional=True)
+    entry_theta: Optional[float] = -abs(theta_magnitude) if theta_magnitude is not None else None
+    if entry_theta is not None:
+        console.print(f"Monthly theta cost: ${abs(entry_theta) * 30:,.2f}")
+
+    # Step 8: IV at purchase (optional) — market IV fetched in Step 4b is shown again here
+    # as a reference so you're not typing against nothing.
+    if market_iv is not None:
+        console.print(f"[dim]Market IV for this contract: {market_iv:.1f}% — enter that, or your own reading.[/dim]")
+    entry_iv = _ask_float("Implied Volatility at purchase (%)", example="35.0", optional=True)
+
+    # Step 9: portfolio percentage check
+    portfolio_value = _leaps_portfolio_value()
+    if portfolio_value is None:
+        console.print("[dim]No tracked portfolio found — enter your total portfolio value manually.[/dim]")
+        portfolio_value = _ask_float("Current total portfolio value ($)", example="250000", min_value=0.01)
+    position_pct = total_cost / portfolio_value * 100 if portfolio_value else 0.0
+    console.print(f"Position size: {position_pct:.2f}% of portfolio")
+    if position_pct > LEAPS_MAX_POSITION_PCT:
+        console.print(f"[red]🚨 EXCEEDS {LEAPS_MAX_POSITION_PCT:.0f}% LEAPS RULE — Position too large.[/red]")
+        if not Confirm.ask("Override?", default=False):
+            console.print("[yellow]Operation cancelled. Position size too large.[/yellow]")
+            raise typer.Exit()
+    elif position_pct > LEAPS_WARN_POSITION_PCT:
+        console.print(f"[yellow]⚠️ Approaching max LEAPS allocation ({LEAPS_WARN_POSITION_PCT:.0f}%).[/yellow]")
+
+    # Step 10: exit rules
+    profit_target_multiplier = _ask_float(
+        "Profit target multiplier", example="1.5", default=LEAPS_DEFAULT_PROFIT_TARGET, min_value=0.01
+    )
+    days_before_expiry_exit = _ask_int(
+        "Days before expiry to force exit", example="90", default=LEAPS_DEFAULT_TIME_STOP_DAYS, min_value=0
+    )
+
+    # Step 11/12: scenario analysis, confirmation + save
+    position = LeapsPosition(
+        id=new_position_id(),
+        ticker=ticker,
+        option_type=option_type,
+        strike=strike,
+        expiration=expiration.isoformat(),
+        premium=premium,
+        contracts=contracts,
+        entry_date=date.today().isoformat(),
+        entry_stock_price=current_price,
+        entry_delta=entry_delta,
+        entry_theta=entry_theta,
+        entry_iv=entry_iv,
+        profit_target_multiplier=profit_target_multiplier,
+        days_before_expiry_exit=days_before_expiry_exit,
+    )
+
+    console.print("\n[bold cyan]Summary[/bold cyan]")
+    console.print(f"  {ticker} {option_type} ${strike:.2f} exp {expiration.isoformat()}")
+    console.print(f"  Premium ${premium:.2f} x {contracts} contract(s) = ${total_cost:,.2f}")
+    console.print(f"  Breakeven: ${breakeven:.2f}  ·  Position size: {position_pct:.2f}%")
+    console.print(f"  Exit: {profit_target_multiplier}x profit target, {days_before_expiry_exit}-day time stop")
+    console.print()
+
+    scenario = analysis.build_leaps_scenario(position, current_price)
+    display.render_leaps_scenario(scenario)
+
+    if not Confirm.ask("Save this LEAPS position?", default=True):
+        console.print("[yellow]Operation cancelled.[/yellow]")
+        raise typer.Exit()
+
+    book = load_leaps()
+    book.add_position(position)
+    save_leaps(book)
+    console.print(f"[green]Saved LEAPS position {ticker} (id={position.id}).[/green]")
+
+
+# ---------------------------------------------------------------------------
+# stocktool leaps list
+# ---------------------------------------------------------------------------
+
+@leaps_app.command("list")
+def leaps_list(
+    all_: bool = typer.Option(False, "--all", help="Show both active and closed positions."),
+    closed: bool = typer.Option(False, "--closed", help="Show only closed positions."),
+) -> None:
+    """List tracked LEAPS positions (active by default)."""
+    from . import data, analysis, display
+    from .leaps import load_leaps
+
+    book = load_leaps()
+    if all_:
+        positions = book.positions
+    elif closed:
+        positions = book.closed_positions()
+    else:
+        positions = book.active_positions()
+
+    if not positions:
+        display.render_leaps_list([])
+        return
+
+    tickers = sorted({p.ticker for p in positions})
+    prices = data.get_current_prices(tickers)
+    portfolio_value = _leaps_portfolio_value()
+
+    snapshots = [
+        analysis.build_leaps_snapshot(p, prices.get(p.ticker), portfolio_value)
+        for p in positions
+    ]
+    display.render_leaps_list(snapshots)
+
+
+# ---------------------------------------------------------------------------
+# stocktool leaps show
+# ---------------------------------------------------------------------------
+
+@leaps_app.command("show")
+def leaps_show(
+    identifier: str = typer.Argument(..., help="LEAPS position id or ticker symbol."),
+) -> None:
+    """Detail view for a single LEAPS position."""
+    from . import data, analysis, display
+    from .leaps import load_leaps
+
+    book = load_leaps()
+    position = _resolve_leaps_position(book, identifier)
+    if position is None:
+        console.print(f"[red]No LEAPS position found for id or ticker '{identifier}'.[/red]")
+        raise typer.Exit(1)
+
+    current_price = data.get_current_prices([position.ticker]).get(position.ticker)
+    portfolio_value = _leaps_portfolio_value()
+    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value)
+    display.render_leaps_detail(position, snapshot)
+
+    console.print()
+    _render_leaps_value_check(position.ticker)
+    console.print()
+    scenario = analysis.build_leaps_scenario(position, current_price)
+    display.render_leaps_scenario(scenario)
+
+
+# ---------------------------------------------------------------------------
+# stocktool leaps update
+# ---------------------------------------------------------------------------
+
+@leaps_app.command("update")
+def leaps_update(
+    identifier: str = typer.Argument(..., help="LEAPS position id or ticker symbol to refresh."),
+) -> None:
+    """Refresh current delta/theta/IV during monitoring — read fresh values off your broker's
+    option chain. Entry values are left untouched (the P&L estimate stays anchored to entry);
+    this only updates the 'as of today' snapshot used for exit-strategy and exposure tracking."""
+    from datetime import date
+
+    from . import data, analysis, display
+    from .leaps import load_leaps, save_leaps
+
+    book = load_leaps()
+    position = _resolve_leaps_position(book, identifier)
+    if position is None:
+        console.print(f"[red]No LEAPS position found for id or ticker '{identifier}'.[/red]")
+        raise typer.Exit(1)
+    if position.status == "CLOSED":
+        console.print(f"[yellow]Position {position.id} is closed — nothing to monitor.[/yellow]")
+        return
+
+    console.print(f"\n[bold]Updating {position.ticker} {position.option_type} ${position.strike:.2f} exp {position.expiration}[/bold]")
+    if position.last_updated:
+        console.print(f"[dim]Last updated: {position.last_updated}[/dim]")
+
+    current_delta = _ask_float(
+        "Current delta (0.00-1.00, from your broker's option chain)",
+        example="0.78",
+        default=position.current_delta if position.current_delta is not None else position.entry_delta,
+        optional=True,
+    )
+    if current_delta is not None:
+        color = analysis.leaps_delta_color(current_delta)
+        if color == "green":
+            console.print(f"[green]✓ Delta {current_delta:.2f} — still in the 0.75-0.85 sweet spot.[/green]")
+        elif color == "yellow":
+            console.print(f"[yellow]Delta {current_delta:.2f} is deep ITM but outside the 0.75-0.85 sweet spot.[/yellow]")
+        else:
+            console.print(f"[red]⚠️ Delta {current_delta:.2f} has drifted out of LEAPS range — this position is behaving less like stock. Review your exit plan.[/red]")
+
+    theta_magnitude = _ask_float(
+        "Current theta per day (magnitude $)",
+        example="0.04",
+        default=abs(position.current_theta) if position.current_theta is not None else (abs(position.entry_theta) if position.entry_theta is not None else None),
+        optional=True,
+    )
+    current_theta = -abs(theta_magnitude) if theta_magnitude is not None else None
+
+    current_iv = _ask_float(
+        "Current Implied Volatility (%)",
+        example="32.0",
+        default=position.current_iv if position.current_iv is not None else position.entry_iv,
+        optional=True,
+    )
+
+    position.current_delta = current_delta
+    position.current_theta = current_theta
+    position.current_iv = current_iv
+    position.last_updated = date.today().isoformat()
+    save_leaps(book)
+    console.print(f"[green]Updated {position.ticker} (id={position.id}) as of {position.last_updated}.[/green]\n")
+
+    current_price = data.get_current_prices([position.ticker]).get(position.ticker)
+    portfolio_value = _leaps_portfolio_value()
+    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value)
+    display.render_leaps_detail(position, snapshot)
+
+
+# ---------------------------------------------------------------------------
+# stocktool leaps remove
+# ---------------------------------------------------------------------------
+
+@leaps_app.command("remove")
+def leaps_remove(
+    identifier: str = typer.Argument(..., help="LEAPS position id or ticker symbol to close."),
+) -> None:
+    """Close a LEAPS position (kept for history, not deleted)."""
+    from rich.prompt import Confirm, FloatPrompt
+
+    from .leaps import load_leaps, save_leaps
+
+    book = load_leaps()
+    position = _resolve_leaps_position(book, identifier)
+    if position is None:
+        console.print(f"[red]No LEAPS position found for id or ticker '{identifier}'.[/red]")
+        raise typer.Exit(1)
+    if position.status == "CLOSED":
+        console.print(f"[yellow]Position {position.id} is already closed (closed_at={position.closed_at}).[/yellow]")
+        return
+
+    close_price = None
+    if Confirm.ask("Record a close price for this position?", default=True):
+        close_price = FloatPrompt.ask("Close price per share ($)")
+
+    ok, msg = book.close_position(position.id, close_price)
+    if ok:
+        save_leaps(book)
+        console.print(f"[green]{msg}[/green]")
+    else:
+        console.print(f"[yellow]{msg}[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # stocktool docs  — quick-reference guide
 # ---------------------------------------------------------------------------
 
@@ -819,6 +1361,10 @@ def docs() -> None:
         ("strategy dip",                  "VIX fear gauge + margin deployment signal",        "--sma-days 200"),
         ("strategy puts",                 "Cash-secured put screener (Buffett style)",        "--min-dte 30  --max-dte 45  --otm 5.0"),
         ("strategy margin [AMOUNT]",      "Track / update margin in use",                     "--reset"),
+        ("leaps add",                     "Interactive LEAPS wizard (sizing/expiry/delta checks)", ""),
+        ("leaps list",                    "Table of tracked LEAPS positions",                 "--all  --closed"),
+        ("leaps show ID|TICKER",          "Detail panel for one LEAPS position",              ""),
+        ("leaps remove ID|TICKER",        "Close (not delete) a LEAPS position",              ""),
     ]
     for cmd, desc, flags in rows:
         cmd_table.add_row(f"stocktool {cmd}", desc, flags)
@@ -893,6 +1439,26 @@ def docs() -> None:
     reb_table.add_row("[green]ON TARGET[/green]",    "within ±2%")
 
     console.print(Columns([vix_table, reb_table], equal=False, expand=False))
+
+    # ── LEAPS rules ───────────────────────────────────────────────────────────
+    from .config import (
+        LEAPS_APPROVED_TICKERS, LEAPS_MIN_DAYS_TO_EXPIRY, LEAPS_DELTA_WARN_LOW,
+        LEAPS_DELTA_WARN_HIGH, LEAPS_WARN_POSITION_PCT, LEAPS_MAX_POSITION_PCT,
+    )
+    leaps_table = Table(title="LEAPS Rules  (leaps add)", box=box.SIMPLE_HEAVY, header_style="bold cyan")
+    leaps_table.add_column("Rule", style="bold")
+    leaps_table.add_column("Threshold")
+    leaps_table.add_column("Enforcement")
+    for row in [
+        ("Approved tickers",    ", ".join(LEAPS_APPROVED_TICKERS), "Hard block"),
+        ("Min days to expiry",  str(LEAPS_MIN_DAYS_TO_EXPIRY), "Hard block"),
+        ("Delta warn band",     f"{LEAPS_DELTA_WARN_LOW:.2f} – {LEAPS_DELTA_WARN_HIGH:.2f}", "Warn only"),
+        ("Delta sweet spot",    "0.75 – 0.85 (Jorge's Rule)", "Highlighted green"),
+        ("Position size warn",  f"> {LEAPS_WARN_POSITION_PCT:.0f}% of portfolio", "Warn only"),
+        ("Position size max",   f"> {LEAPS_MAX_POSITION_PCT:.0f}% of portfolio", "Warn + y/N override"),
+    ]:
+        leaps_table.add_row(*row)
+    console.print(leaps_table)
 
     # ── Valuation projection ──────────────────────────────────────────────────
     console.print(Panel(

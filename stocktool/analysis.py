@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
+
+from .leaps import LeapsPosition
 
 
 @dataclass
@@ -1329,3 +1332,326 @@ def _score_return(r: Optional[float]) -> str:
     if r >= 0:
         return "yellow"
     return "red"
+
+
+# --- LEAPS tracking ---
+
+@dataclass
+class LeapsSnapshot:
+    """Computed view of one LeapsPosition: entry data plus derived calculations."""
+    id: str
+    ticker: str
+    option_type: str
+    strike: float
+    expiration: str
+    premium: float
+    contracts: int
+    entry_stock_price: float
+    entry_delta: Optional[float]
+    entry_theta: Optional[float]
+    entry_iv: Optional[float]
+    status: str
+    current_stock_price: Optional[float] = None
+    current_delta: Optional[float] = None
+    current_theta: Optional[float] = None
+    current_iv: Optional[float] = None
+    last_updated: Optional[str] = None
+    # --- computed ---
+    breakeven: Optional[float] = None
+    days_to_expiry: Optional[int] = None
+    days_held: Optional[int] = None
+    position_pct: Optional[float] = None
+    theoretical_current_value: Optional[float] = None
+    theoretical_pnl: Optional[float] = None
+    accumulated_theta: Optional[float] = None
+    profit_pct: Optional[float] = None
+    # --- stock-equivalent exposure (value-investor "LEAPS as stock substitute" view) ---
+    effective_shares: Optional[float] = None
+    effective_exposure: Optional[float] = None
+    effective_position_pct: Optional[float] = None
+    leverage_ratio: Optional[float] = None
+
+
+def leaps_dte_color(days_to_expiry: Optional[int]) -> str:
+    """Red once inside the default 90-day time-stop window, else green."""
+    if days_to_expiry is None:
+        return "dim"
+    from .config import LEAPS_DEFAULT_TIME_STOP_DAYS
+    return "red" if days_to_expiry < LEAPS_DEFAULT_TIME_STOP_DAYS else "green"
+
+
+def leaps_profit_color(profit_pct: Optional[float], profit_target_multiplier: float = 1.5) -> str:
+    """Green at/above the profit target, yellow while positive but below target, red when negative."""
+    if profit_pct is None:
+        return "dim"
+    target_pct = (profit_target_multiplier - 1) * 100
+    if profit_pct >= target_pct:
+        return "green"
+    if profit_pct >= 0:
+        return "yellow"
+    return "red"
+
+
+def leaps_delta_color(delta: Optional[float]) -> str:
+    """Jorge's Rule sweet spot: green 0.75-0.85, yellow 0.70-0.75 / 0.85-0.90, red otherwise."""
+    if delta is None:
+        return "dim"
+    if 0.75 <= delta <= 0.85:
+        return "green"
+    if 0.70 <= delta < 0.75 or 0.85 < delta <= 0.90:
+        return "yellow"
+    return "red"
+
+
+def leaps_leverage_color(leverage_ratio: Optional[float]) -> str:
+    """Option leverage/elasticity color: green <=4x (solidly stock-like), yellow 4-7x
+    (typical deep-ITM LEAPS), red >7x (drifted into speculative, low-delta territory)."""
+    if leverage_ratio is None:
+        return "dim"
+    if leverage_ratio <= 4:
+        return "green"
+    if leverage_ratio <= 7:
+        return "yellow"
+    return "red"
+
+
+def leaps_exposure_color(effective_position_pct: Optional[float]) -> str:
+    """Delta-adjusted market-exposure color, mirroring the wizard's own 3%/5% cash-sizing bands."""
+    if effective_position_pct is None:
+        return "dim"
+    from .config import LEAPS_MAX_POSITION_PCT, LEAPS_WARN_POSITION_PCT
+    if effective_position_pct > LEAPS_MAX_POSITION_PCT:
+        return "red"
+    if effective_position_pct > LEAPS_WARN_POSITION_PCT:
+        return "yellow"
+    return "green"
+
+
+def possible_return_verdict(pct: Optional[float]) -> tuple[str, str]:
+    """Color + label for a valuation engine's possible_return_pct, mirroring build_valuation_snapshot's own convention."""
+    if pct is None:
+        return "dim", "N/A"
+    if pct >= 50:
+        return "bold green", "Strong opportunity"
+    if pct >= 15:
+        return "bold yellow", "Moderate upside"
+    if pct >= 0:
+        return "dim", "Limited upside"
+    return "bold red", "Projected downside"
+
+
+def build_leaps_snapshot(
+    position: LeapsPosition,
+    current_price: Optional[float],
+    portfolio_value: Optional[float] = None,
+) -> LeapsSnapshot:
+    strike, premium = position.strike, position.premium
+    breakeven = strike + premium if position.option_type == "CALL" else strike - premium
+
+    expiration_date = date.fromisoformat(position.expiration)
+    days_to_expiry = (expiration_date - date.today()).days
+
+    entry_date = date.fromisoformat(position.entry_date) if position.entry_date else date.today()
+    days_held = (date.today() - entry_date).days
+
+    position_pct = None
+    if portfolio_value:
+        position_pct = (position.contracts * premium * 100) / portfolio_value * 100
+
+    # Use the freshest delta/theta available: a `leaps update` refresh takes priority over the
+    # fixed entry reading, since theoretical value/P&L/accumulated theta are meant to reflect
+    # *today's* option behavior, not entry-day assumptions. Falls back to entry_delta/entry_theta
+    # when no `leaps update` has been recorded yet (same fallback pattern used throughout).
+    effective_delta = position.current_delta if position.current_delta is not None else position.entry_delta
+    effective_theta = position.current_theta if position.current_theta is not None else position.entry_theta
+
+    theoretical_current_value = None
+    theoretical_pnl = None
+    profit_pct = None
+    if effective_delta is not None and current_price is not None:
+        theoretical_current_value = premium + (current_price - position.entry_stock_price) * effective_delta
+        theoretical_pnl = (theoretical_current_value - premium) * 100 * position.contracts
+        if premium:
+            profit_pct = (theoretical_current_value - premium) / premium * 100
+
+    accumulated_theta = None
+    if effective_theta is not None:
+        accumulated_theta = days_held * abs(effective_theta) * 100 * position.contracts
+
+    # Stock-equivalent exposure also uses effective_delta (computed above) since it reflects
+    # *today's* real market exposure, not the exposure at entry.
+    effective_shares = None
+    effective_exposure = None
+    effective_position_pct = None
+    leverage_ratio = None
+    if effective_delta is not None:
+        effective_shares = effective_delta * 100 * position.contracts
+        if current_price is not None:
+            effective_exposure = effective_shares * current_price
+            if portfolio_value:
+                effective_position_pct = effective_exposure / portfolio_value * 100
+            if theoretical_current_value:
+                leverage_ratio = (effective_delta * current_price) / theoretical_current_value
+
+    return LeapsSnapshot(
+        id=position.id,
+        ticker=position.ticker,
+        option_type=position.option_type,
+        strike=strike,
+        expiration=position.expiration,
+        premium=premium,
+        contracts=position.contracts,
+        entry_stock_price=position.entry_stock_price,
+        entry_delta=position.entry_delta,
+        entry_theta=position.entry_theta,
+        entry_iv=position.entry_iv,
+        status=position.status,
+        current_stock_price=current_price,
+        current_delta=position.current_delta,
+        current_theta=position.current_theta,
+        current_iv=position.current_iv,
+        last_updated=position.last_updated,
+        breakeven=breakeven,
+        days_to_expiry=days_to_expiry,
+        days_held=days_held,
+        position_pct=position_pct,
+        theoretical_current_value=theoretical_current_value,
+        theoretical_pnl=theoretical_pnl,
+        accumulated_theta=accumulated_theta,
+        profit_pct=profit_pct,
+        effective_shares=effective_shares,
+        effective_exposure=effective_exposure,
+        effective_position_pct=effective_position_pct,
+        leverage_ratio=leverage_ratio,
+    )
+
+
+@dataclass
+class LeapsScenarioRow:
+    price: float
+    intrinsic: float
+    pnl: float
+    return_pct: float
+
+
+@dataclass
+class LeapsScenario:
+    """At-expiration P&L ladder plus breakeven/early-exit context for one LeapsPosition.
+
+    Pure math — intrinsic value at expiration needs no Greeks. The early-exit price
+    estimate reuses the same linear delta approximation as LeapsSnapshot's theoretical
+    P&L (no time-decay/theta modeling), so it is explicitly flagged as a rough guide.
+    """
+    ticker: str
+    option_type: str
+    strike: float
+    premium: float
+    contracts: int
+    total_cost: float
+    breakeven: float
+    days_to_expiry: Optional[int]
+    base_price: float
+    rows: list[LeapsScenarioRow]
+    pct_move_to_breakeven: Optional[float]
+    move_direction: str  # "rise" or "fall"
+    upside_scenarios: list[tuple[float, LeapsScenarioRow]]
+    early_exit_target_value: Optional[float]
+    early_exit_target_price: Optional[float]
+    time_stop_date: Optional[str]
+    warnings: list[str] = field(default_factory=list)
+
+
+def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float] = None) -> LeapsScenario:
+    is_call = position.option_type == "CALL"
+    strike, premium, contracts = position.strike, position.premium, position.contracts
+    total_cost = premium * 100 * contracts
+    breakeven = strike + premium if is_call else strike - premium
+    base_price = current_price if current_price is not None else position.entry_stock_price
+
+    def _row(price: float) -> LeapsScenarioRow:
+        intrinsic = (
+            max(0.0, price - strike) * 100 * contracts
+            if is_call
+            else max(0.0, strike - price) * 100 * contracts
+        )
+        pnl = intrinsic - total_cost
+        return_pct = pnl / total_cost * 100 if total_cost else 0.0
+        return LeapsScenarioRow(price=price, intrinsic=intrinsic, pnl=pnl, return_pct=return_pct)
+
+    multipliers = (
+        [0.7, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6]
+        if is_call
+        else [1.3, 1.15, 1.05, 1.0, 0.9, 0.8, 0.7, 0.6, 0.4]
+    )
+    price_points = {round(base_price * m) for m in multipliers} if base_price else set()
+    price_points.add(round(strike))
+    price_points.add(round(breakeven))
+    rows = [_row(float(p)) for p in sorted(price_points)]
+
+    pct_move_to_breakeven = None
+    if base_price:
+        pct_move_to_breakeven = (
+            (breakeven - base_price) / base_price * 100
+            if is_call
+            else (base_price - breakeven) / base_price * 100
+        )
+    move_direction = "rise" if is_call else "fall"
+
+    upside_scenarios: list[tuple[float, LeapsScenarioRow]] = []
+    if base_price:
+        for pct in (20.0, 40.0):
+            target_price = base_price * (1 + pct / 100) if is_call else base_price * (1 - pct / 100)
+            upside_scenarios.append((pct, _row(target_price)))
+
+    days_to_expiry = None
+    time_stop_date = None
+    try:
+        exp_date = date.fromisoformat(position.expiration)
+        days_to_expiry = (exp_date - date.today()).days
+        time_stop_date = (exp_date - timedelta(days=position.days_before_expiry_exit)).isoformat()
+    except ValueError:
+        pass
+
+    early_exit_target_value = premium * position.profit_target_multiplier
+    early_exit_target_price = None
+    effective_delta = position.current_delta if position.current_delta is not None else position.entry_delta
+    if effective_delta:
+        delta_move = (early_exit_target_value - premium) / effective_delta
+        early_exit_target_price = (
+            position.entry_stock_price + delta_move if is_call else position.entry_stock_price - delta_move
+        )
+
+    warnings: list[str] = []
+    if position.entry_iv is not None:
+        warnings.append(
+            f"IV at entry: {position.entry_iv:.1f}% — recheck current IV rank with your broker; "
+            "this tool doesn't track IV history."
+        )
+    warnings.append(
+        "Confirm the next earnings date before entering or exiting — IV often drops sharply after earnings reports."
+    )
+    if time_stop_date:
+        warnings.append(
+            f"Time-stop: plan to close or roll by {time_stop_date} "
+            f"({position.days_before_expiry_exit} days before expiry) — theta accelerates sharply inside that window."
+        )
+
+    return LeapsScenario(
+        ticker=position.ticker,
+        option_type=position.option_type,
+        strike=strike,
+        premium=premium,
+        contracts=contracts,
+        total_cost=total_cost,
+        breakeven=breakeven,
+        days_to_expiry=days_to_expiry,
+        base_price=base_price,
+        rows=rows,
+        pct_move_to_breakeven=pct_move_to_breakeven,
+        move_direction=move_direction,
+        upside_scenarios=upside_scenarios,
+        early_exit_target_value=early_exit_target_value,
+        early_exit_target_price=early_exit_target_price,
+        time_stop_date=time_stop_date,
+        warnings=warnings,
+    )

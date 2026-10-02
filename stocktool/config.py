@@ -28,6 +28,24 @@ MARGIN_RULES = [
     (28, 0.15, "EARLY WARNING"),
 ]
 
+# LEAPS tracking (stocktool leaps)
+LEAPS_FILE = CONFIG_DIR / "leaps.json"
+LEAPS_APPROVED_TICKERS = [
+    t.strip().upper()
+    for t in os.environ.get("LEAPS_APPROVED_TICKERS", "GOOGL,AMZN,MSFT").split(",")
+    if t.strip()
+]
+LEAPS_MIN_DAYS_TO_EXPIRY = 365
+LEAPS_LONG_EXPIRY_WARN_DAYS = 730
+LEAPS_DELTA_WARN_LOW = 0.70
+LEAPS_DELTA_WARN_HIGH = 0.90
+LEAPS_MAX_POSITION_PCT = 5.0
+LEAPS_WARN_POSITION_PCT = 3.0
+LEAPS_DEFAULT_PROFIT_TARGET = 1.5
+LEAPS_DEFAULT_TIME_STOP_DAYS = 90
+# Warn in the `leaps add` wizard if the next earnings date falls within this many days of today
+LEAPS_EARNINGS_WARN_DAYS = int(os.environ.get("LEAPS_EARNINGS_WARN_DAYS", "21"))
+
 # Google Sheets settings
 CREDENTIALS_FILE = Path(
     os.environ.get("GOOGLE_SHEETS_CREDENTIALS_FILE", str(CONFIG_DIR / "credentials.json"))

@@ -10,8 +10,11 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    score_ticker, pe_category, pe_vs_history_label, cash_debt_rating, capex_intensity_color,
+    LeapsSnapshot, LeapsScenario, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
+    capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
+    leaps_leverage_color, leaps_exposure_color,
 )
+from .leaps import LeapsPosition
 from .portfolio import PortfolioSnapshot
 
 console = Console()
@@ -2076,6 +2079,259 @@ def render_cash_secured_puts(snapshots: list[CashSecuredPutSnapshot]) -> None:
         title="[bold magenta]Put-Selling Strategy Summary[/bold magenta]",
         border_style="magenta",
     ))
+
+
+def render_leaps_candidates(positions: list[LeapsPosition]) -> None:
+    """Render a numbered picker table when a ticker matches multiple LEAPS positions."""
+
+    table = Table(title="Multiple LEAPS positions found", show_lines=True, header_style="bold cyan")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("ID", style="dim")
+    table.add_column("Ticker", style="bold")
+    table.add_column("Type")
+    table.add_column("Strike", justify="right")
+    table.add_column("Expiration")
+    table.add_column("Status")
+
+    for idx, pos in enumerate(positions, start=1):
+        status_str = "[green]ACTIVE[/green]" if pos.status == "ACTIVE" else "[dim]CLOSED[/dim]"
+        table.add_row(
+            str(idx),
+            pos.id,
+            pos.ticker,
+            pos.option_type,
+            f"${pos.strike:.2f}",
+            pos.expiration,
+            status_str,
+        )
+
+    console.print(table)
+
+
+def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
+    """Render a table of LEAPS positions with a summary panel."""
+
+    if not snapshots:
+        console.print("[yellow]No LEAPS positions found. Add one with `stocktool leaps add`.[/yellow]")
+        return
+
+    table = Table(title="LEAPS Positions", show_lines=True, header_style="bold cyan")
+    table.add_column("ID", style="dim")
+    table.add_column("Ticker", style="bold")
+    table.add_column("Type")
+    table.add_column("Strike", justify="right")
+    table.add_column("Expiration")
+    table.add_column("DTE", justify="right")
+    table.add_column("Premium", justify="right")
+    table.add_column("Theo. P&L", justify="right")
+    table.add_column("Profit %", justify="right")
+    table.add_column("Leverage", justify="right")
+    table.add_column("Status")
+
+    for snap in snapshots:
+        dte_color = leaps_dte_color(snap.days_to_expiry)
+        profit_color = leaps_profit_color(snap.profit_pct)
+        leverage_color = leaps_leverage_color(snap.leverage_ratio)
+        status_str = "[green]ACTIVE[/green]" if snap.status == "ACTIVE" else "[dim]CLOSED[/dim]"
+        table.add_row(
+            snap.id,
+            snap.ticker,
+            snap.option_type,
+            f"${snap.strike:.2f}",
+            snap.expiration,
+            Text(str(snap.days_to_expiry), style=dte_color) if snap.days_to_expiry is not None else Text("N/A", style="dim"),
+            f"${snap.premium:.2f}",
+            f"${snap.theoretical_pnl:,.0f}" if snap.theoretical_pnl is not None else "N/A",
+            Text(f"{snap.profit_pct:.1f}%", style=profit_color) if snap.profit_pct is not None else Text("N/A", style="dim"),
+            Text(f"{snap.leverage_ratio:.1f}x", style=leverage_color) if snap.leverage_ratio is not None else Text("N/A", style="dim"),
+            status_str,
+        )
+
+    console.print(table)
+
+    active = [s for s in snapshots if s.status == "ACTIVE"]
+    total_pnl = sum(s.theoretical_pnl for s in active if s.theoretical_pnl is not None)
+    lines = [f"[bold]Active positions:[/bold] {len(active)}"]
+    if any(s.theoretical_pnl is not None for s in active):
+        pnl_color = "green" if total_pnl >= 0 else "red"
+        lines.append(f"[bold]Total theoretical P&L:[/bold] [{pnl_color}]${total_pnl:,.0f}[/{pnl_color}]")
+    nearing_exit = [s for s in active if s.days_to_expiry is not None and leaps_dte_color(s.days_to_expiry) == "red"]
+    if nearing_exit:
+        tickers_str = ", ".join(s.ticker for s in nearing_exit)
+        lines.append(f"[bold red]Inside time-stop window:[/bold red] {tickers_str}")
+    drifted = [
+        s for s in active
+        if (s.current_delta if s.current_delta is not None else s.entry_delta) is not None
+        and leaps_delta_color(s.current_delta if s.current_delta is not None else s.entry_delta) == "red"
+    ]
+    if drifted:
+        tickers_str = ", ".join(s.ticker for s in drifted)
+        lines.append(f"[bold red]Delta drifted outside LEAPS range:[/bold red] {tickers_str} — recheck with `leaps show`/`leaps update`")
+    high_leverage = [s for s in active if leaps_leverage_color(s.leverage_ratio) == "red"]
+    if high_leverage:
+        tickers_str = ", ".join(s.ticker for s in high_leverage)
+        lines.append(f"[bold red]Leverage above 7x (losing stock-like character):[/bold red] {tickers_str}")
+    lines.append("[dim]Theoretical P&L is a delta-based estimate from entry Greeks, not a live option quote.[/dim]")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]LEAPS Summary[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> None:
+    """Render a detail panel for a single LEAPS position: entry data plus computed metrics."""
+
+    dte_color = leaps_dte_color(snapshot.days_to_expiry)
+    profit_color = leaps_profit_color(snapshot.profit_pct, position.profit_target_multiplier)
+    status_str = "[green]ACTIVE[/green]" if position.status == "ACTIVE" else "[dim]CLOSED[/dim]"
+
+    lines = [
+        f"[bold]{position.ticker} {position.option_type} ${position.strike:.2f}[/bold]  exp {position.expiration}  (id={position.id})",
+        f"Status: {status_str}",
+        "",
+        "[bold cyan]Entry Snapshot[/bold cyan]",
+        f"  Entry date: {position.entry_date or 'N/A'}",
+        f"  Entry stock price: ${position.entry_stock_price:.2f}",
+        f"  Premium paid: ${position.premium:.2f}  ·  Contracts: {position.contracts}  ·  Total cost: ${position.premium * 100 * position.contracts:,.2f}",
+        (
+            f"  Delta: [{leaps_delta_color(position.entry_delta)}]{position.entry_delta}[/{leaps_delta_color(position.entry_delta)}]"
+            if position.entry_delta is not None
+            else "  Delta: N/A"
+        ),
+        f"  Theta: {position.entry_theta if position.entry_theta is not None else 'N/A'}",
+        f"  IV: {position.entry_iv if position.entry_iv is not None else 'N/A'}%",
+        "",
+        "[bold cyan]Monitoring (last `leaps update`)[/bold cyan]",
+        (
+            f"  Current delta: [{leaps_delta_color(position.current_delta)}]{position.current_delta}[/{leaps_delta_color(position.current_delta)}]"
+            if position.current_delta is not None
+            else "  Current delta: N/A — run `stocktool leaps update` with a fresh reading from your broker"
+        ),
+        f"  Current theta: -${abs(position.current_theta):.2f}/day" if position.current_theta is not None else "  Current theta: N/A",
+        f"  Current IV: {position.current_iv:.1f}%" if position.current_iv is not None else "  Current IV: N/A",
+        f"  Last updated: {position.last_updated}" if position.last_updated else "  Last updated: never — entry values are the only reading on file",
+        "",
+        "[bold cyan]Computed[/bold cyan]",
+        f"  Breakeven: ${snapshot.breakeven:.2f}" if snapshot.breakeven is not None else "  Breakeven: N/A",
+        f"  Days to expiry: [{dte_color}]{snapshot.days_to_expiry}[/{dte_color}]" if snapshot.days_to_expiry is not None else "  Days to expiry: N/A",
+        f"  Days held: {snapshot.days_held}" if snapshot.days_held is not None else "  Days held: N/A",
+        f"  Current stock price: ${snapshot.current_stock_price:.2f}" if snapshot.current_stock_price is not None else "  Current stock price: N/A",
+        f"  Theoretical value: ${snapshot.theoretical_current_value:.2f}" if snapshot.theoretical_current_value is not None else "  Theoretical value: N/A (needs a delta — entry or current — + current price)",
+        f"  Theoretical P&L: ${snapshot.theoretical_pnl:,.2f}" if snapshot.theoretical_pnl is not None else "  Theoretical P&L: N/A",
+        f"  Profit %: [{profit_color}]{snapshot.profit_pct:.1f}%[/{profit_color}]" if snapshot.profit_pct is not None else "  Profit %: N/A",
+        f"  Accumulated theta: ${snapshot.accumulated_theta:,.2f}" if snapshot.accumulated_theta is not None else "  Accumulated theta: N/A (needs a theta — entry or current)",
+        "[dim]Theoretical value/P&L/Profit %/Accumulated theta use current delta/theta when you've run `leaps update`, else fall back to entry delta/theta.[/dim]",
+        f"  Position size (cash at risk): {snapshot.position_pct:.2f}% of portfolio" if snapshot.position_pct is not None else "  Position size (cash at risk): N/A",
+        "",
+        "[bold cyan]Stock-Equivalent Exposure[/bold cyan]",
+        (
+            f"  Effective shares controlled: {snapshot.effective_shares:,.0f}"
+            if snapshot.effective_shares is not None
+            else "  Effective shares controlled: N/A (needs delta)"
+        ),
+        (
+            f"  Effective market exposure: ${snapshot.effective_exposure:,.2f}"
+            if snapshot.effective_exposure is not None
+            else "  Effective market exposure: N/A (needs delta + current price)"
+        ),
+        (
+            f"  Effective position size: [{leaps_exposure_color(snapshot.effective_position_pct)}]{snapshot.effective_position_pct:.2f}%[/{leaps_exposure_color(snapshot.effective_position_pct)}] of portfolio (true market exposure)"
+            if snapshot.effective_position_pct is not None
+            else "  Effective position size: N/A (needs delta + current price + portfolio value)"
+        ),
+        (
+            f"  Leverage ratio: [{leaps_leverage_color(snapshot.leverage_ratio)}]{snapshot.leverage_ratio:.1f}x[/{leaps_leverage_color(snapshot.leverage_ratio)}] — a 1% stock move is ~{snapshot.leverage_ratio:.1f}% on this position"
+            if snapshot.leverage_ratio is not None
+            else "  Leverage ratio: N/A (needs delta + current price)"
+        ),
+        "[dim]Uses current delta when you've run `leaps update`, else falls back to entry delta.[/dim]",
+        "",
+        "[bold cyan]Exit Rules[/bold cyan]",
+        f"  Profit target: {position.profit_target_multiplier}x (+{(position.profit_target_multiplier - 1) * 100:.0f}%)",
+        f"  Time stop: {position.days_before_expiry_exit} days before expiry",
+    ]
+
+    if position.status == "CLOSED":
+        lines += [
+            "",
+            "[bold cyan]Close[/bold cyan]",
+            f"  Closed at: {position.closed_at}",
+            f"  Close price: ${position.close_price:.2f}" if position.close_price is not None else "  Close price: N/A",
+            f"  Realized P&L: ${position.realized_pnl:,.2f}" if position.realized_pnl is not None else "  Realized P&L: N/A",
+        ]
+
+    console.print(Panel(
+        "\n".join(lines),
+        title=f"[bold magenta]LEAPS Position: {position.ticker}[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_scenario(scenario: LeapsScenario) -> None:
+    """Render an at-expiration P&L ladder, key levels, early-exit estimate, and warnings."""
+
+    exp_str = f" ({scenario.days_to_expiry}d)" if scenario.days_to_expiry is not None else ""
+    table = Table(
+        title=f"{scenario.ticker} {scenario.option_type} ${scenario.strike:.0f} — Scenario Analysis{exp_str}",
+        show_lines=False,
+        header_style="bold cyan",
+        caption="Intrinsic value at expiration only — ignores any remaining time value before then.",
+    )
+    table.add_column("Price", justify="right")
+    table.add_column("Intrinsic", justify="right")
+    table.add_column("P&L", justify="right")
+    table.add_column("Return", justify="right")
+
+    for row in scenario.rows:
+        color = "green" if row.pnl > 0 else ("yellow" if row.pnl == 0 else "red")
+        table.add_row(
+            f"${row.price:,.0f}",
+            f"${row.intrinsic:,.0f}",
+            Text(f"{row.pnl:+,.0f}", style=color),
+            Text(f"{row.return_pct:+.0f}%", style=color),
+        )
+
+    console.print(table)
+
+    lines = []
+    loss_side = "At/below" if scenario.option_type == "CALL" else "At/above"
+    lines.append(f"[red]{loss_side} ${scenario.strike:.2f} at expiry: 100% LOSS (-${scenario.total_cost:,.0f})[/red]")
+    lines.append(f"[bold]${scenario.breakeven:.2f}[/bold] at expiry: BREAKEVEN")
+    if scenario.pct_move_to_breakeven is not None and scenario.days_to_expiry is not None:
+        months = max(scenario.days_to_expiry / 30, 0)
+        lines.append(
+            f"{scenario.ticker} needs to {scenario.move_direction} "
+            f"{abs(scenario.pct_move_to_breakeven):.1f}% in ~{months:.0f} months to break even"
+        )
+    for pct, row in scenario.upside_scenarios:
+        direction = "rises" if scenario.option_type == "CALL" else "falls"
+        pnl_color = "green" if row.pnl > 0 else "red"
+        lines.append(
+            f"{scenario.ticker} {direction} {pct:.0f}% to ${row.price:,.0f} → "
+            f"[{pnl_color}]{row.pnl:+,.0f} ({row.return_pct:+.0f}%)[/{pnl_color}]"
+        )
+
+    console.print(Panel("\n".join(lines), title="[bold magenta]Key Levels[/bold magenta]", border_style="magenta"))
+
+    exit_lines = [f"+{(scenario.early_exit_target_value / scenario.premium - 1) * 100:.0f}% target = sell contract at ~${scenario.early_exit_target_value:.2f}"]
+    if scenario.early_exit_target_price is not None:
+        exit_lines.append(f"Approx. required {scenario.ticker} price: ~${scenario.early_exit_target_price:,.0f}")
+        exit_lines.append(
+            "[dim]Rough guide only — linear estimate from delta (current if you've run `leaps update`, "
+            "else entry), ignores time decay (theta). Actual price needed may differ.[/dim]"
+        )
+    else:
+        exit_lines.append("[dim]Enter a delta at purchase to estimate the required stock price for this target.[/dim]")
+    console.print(Panel("\n".join(exit_lines), title="[bold magenta]Early Exit Scenario (+Profit Target)[/bold magenta]", border_style="magenta"))
+
+    if scenario.warnings:
+        console.print(Panel(
+            "\n".join(f"• {w}" for w in scenario.warnings),
+            title="[bold yellow]Warning Signs[/bold yellow]",
+            border_style="yellow",
+        ))
 
 
 def _fmt_pct(value: float | None) -> str:
