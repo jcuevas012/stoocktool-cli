@@ -1361,6 +1361,8 @@ class LeapsSnapshot:
     days_to_expiry: Optional[int] = None
     days_held: Optional[int] = None
     position_pct: Optional[float] = None
+    intrinsic_value: Optional[float] = None
+    intrinsic_value_pct: Optional[float] = None
     theoretical_current_value: Optional[float] = None
     theoretical_pnl: Optional[float] = None
     accumulated_theta: Optional[float] = None
@@ -1458,6 +1460,15 @@ def build_leaps_snapshot(
     if portfolio_value:
         position_pct = (position.contracts * premium * 100) / portfolio_value * 100
 
+    intrinsic_value = None
+    intrinsic_value_pct = None
+    if current_price is not None:
+        intrinsic_value = (
+            max(0.0, current_price - strike) if position.option_type == "CALL" else max(0.0, strike - current_price)
+        )
+        if current_price:
+            intrinsic_value_pct = intrinsic_value / current_price * 100
+
     # Use the freshest delta/theta available: a `leaps update` refresh takes priority over the
     # fixed entry reading, since theoretical value/P&L/accumulated theta are meant to reflect
     # *today's* option behavior, not entry-day assumptions. Falls back to entry_delta/entry_theta
@@ -1515,6 +1526,8 @@ def build_leaps_snapshot(
         days_to_expiry=days_to_expiry,
         days_held=days_held,
         position_pct=position_pct,
+        intrinsic_value=intrinsic_value,
+        intrinsic_value_pct=intrinsic_value_pct,
         theoretical_current_value=theoretical_current_value,
         theoretical_pnl=theoretical_pnl,
         accumulated_theta=accumulated_theta,
@@ -1535,12 +1548,24 @@ class LeapsScenarioRow:
 
 
 @dataclass
-class LeapsScenario:
-    """At-expiration P&L ladder plus breakeven/early-exit context for one LeapsPosition.
+class LeapsLossExitLevel:
+    loss_pct: float  # 30.0 or 50.0
+    target_value: float  # contract value (per-share) at this loss level
+    target_price: Optional[float]  # approx. required stock price, via linear delta estimate
+    severity: str  # "yellow" or "red"
 
-    Pure math — intrinsic value at expiration needs no Greeks. The early-exit price
-    estimate reuses the same linear delta approximation as LeapsSnapshot's theoretical
-    P&L (no time-decay/theta modeling), so it is explicitly flagged as a rough guide.
+
+# (loss_pct, severity) — 30% is an early warning to reassess, 50% is a hard exit signal
+LOSS_EXIT_THRESHOLDS: tuple[tuple[float, str], ...] = ((30.0, "yellow"), (50.0, "red"))
+
+
+@dataclass
+class LeapsScenario:
+    """At-expiration P&L ladder plus breakeven/early-exit/loss-exit context for one LeapsPosition.
+
+    Pure math — intrinsic value at expiration needs no Greeks. The early-exit and loss-exit price
+    estimates reuse the same linear delta approximation as LeapsSnapshot's theoretical
+    P&L (no time-decay/theta modeling), so they are explicitly flagged as a rough guide.
     """
     ticker: str
     option_type: str
@@ -1557,6 +1582,7 @@ class LeapsScenario:
     upside_scenarios: list[tuple[float, LeapsScenarioRow]]
     early_exit_target_value: Optional[float]
     early_exit_target_price: Optional[float]
+    loss_exit_levels: list[LeapsLossExitLevel]
     time_stop_date: Optional[str]
     warnings: list[str] = field(default_factory=list)
 
@@ -1621,6 +1647,21 @@ def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float]
             position.entry_stock_price + delta_move if is_call else position.entry_stock_price - delta_move
         )
 
+    loss_exit_levels: list[LeapsLossExitLevel] = []
+    for loss_pct, severity in LOSS_EXIT_THRESHOLDS:
+        target_value = premium * (1 - loss_pct / 100)
+        target_price = None
+        if effective_delta:
+            delta_move = (target_value - premium) / effective_delta
+            target_price = (
+                position.entry_stock_price + delta_move if is_call else position.entry_stock_price - delta_move
+            )
+        loss_exit_levels.append(
+            LeapsLossExitLevel(
+                loss_pct=loss_pct, target_value=target_value, target_price=target_price, severity=severity
+            )
+        )
+
     warnings: list[str] = []
     if position.entry_iv is not None:
         warnings.append(
@@ -1652,6 +1693,7 @@ def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float]
         upside_scenarios=upside_scenarios,
         early_exit_target_value=early_exit_target_value,
         early_exit_target_price=early_exit_target_price,
+        loss_exit_levels=loss_exit_levels,
         time_stop_date=time_stop_date,
         warnings=warnings,
     )

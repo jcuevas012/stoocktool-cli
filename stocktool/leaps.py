@@ -11,6 +11,21 @@ from .config import LEAPS_FILE, ensure_config_dir
 
 
 @dataclass
+class IvReading:
+    """One point in a LeapsPosition's accumulated IV history.
+
+    yfinance has no historical-IV endpoint (see CLAUDE.md) — there is no way to fetch IV
+    readings from the past. This instead builds a real history forward in time: one point
+    seeded at `leaps add` (market IV from Yahoo's option chain for the exact contract, or the
+    manually-entered entry IV if Yahoo had no quote), then one more point each time
+    `leaps update` runs.
+    """
+    date: str   # ISO date
+    iv: float   # percent
+    source: str  # "yahoo" (fetched from Yahoo's live option chain) or "manual" (typed by hand)
+
+
+@dataclass
 class LeapsPosition:
     id: str
     ticker: str
@@ -28,6 +43,7 @@ class LeapsPosition:
     current_theta: Optional[float] = None
     current_iv: Optional[float] = None
     last_updated: Optional[str] = None  # ISO date of the last `leaps update`
+    iv_history: list[IvReading] = field(default_factory=list)
     profit_target_multiplier: float = 1.5
     days_before_expiry_exit: int = 90
     status: str = "ACTIVE"     # "ACTIVE" or "CLOSED"
@@ -101,6 +117,7 @@ def load_leaps() -> LeapsBook:
                 current_theta=p.get("current_theta"),
                 current_iv=p.get("current_iv"),
                 last_updated=p.get("last_updated"),
+                iv_history=[IvReading(**r) for r in p.get("iv_history", [])],
                 profit_target_multiplier=p.get("profit_target_multiplier", 1.5),
                 days_before_expiry_exit=p.get("days_before_expiry_exit", 90),
                 status=p.get("status", "ACTIVE"),

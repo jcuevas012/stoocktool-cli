@@ -946,7 +946,7 @@ def leaps_add() -> None:
         LEAPS_WARN_POSITION_PCT, LEAPS_DEFAULT_PROFIT_TARGET, LEAPS_DEFAULT_TIME_STOP_DAYS,
         LEAPS_EARNINGS_WARN_DAYS,
     )
-    from .leaps import LeapsPosition, load_leaps, save_leaps, new_position_id
+    from .leaps import LeapsPosition, IvReading, load_leaps, save_leaps, new_position_id
 
     console.print("\n[bold]LEAPS Wizard — Add New Position[/bold]")
     console.print("=" * 32)
@@ -1122,6 +1122,15 @@ def leaps_add() -> None:
         days_before_expiry_exit=days_before_expiry_exit,
     )
 
+    # Seed IV history going forward from today — yfinance has no historical-IV endpoint, so
+    # this can't backfill the past, only start accumulating real readings from here on.
+    # Prefer the Yahoo-quoted market IV for this exact contract (Step 4b) over the manually
+    # typed entry IV, since it's an actual market reading rather than a hand-entered one.
+    if market_iv is not None:
+        position.iv_history.append(IvReading(date=position.entry_date, iv=round(market_iv, 2), source="yahoo"))
+    elif entry_iv is not None:
+        position.iv_history.append(IvReading(date=position.entry_date, iv=entry_iv, source="manual"))
+
     console.print("\n[bold cyan]Summary[/bold cyan]")
     console.print(f"  {ticker} {option_type} ${strike:.2f} exp {expiration.isoformat()}")
     console.print(f"  Premium ${premium:.2f} x {contracts} contract(s) = ${total_cost:,.2f}")
@@ -1222,7 +1231,7 @@ def leaps_update(
     from datetime import date
 
     from . import data, analysis, display
-    from .leaps import load_leaps, save_leaps
+    from .leaps import load_leaps, save_leaps, IvReading
 
     book = load_leaps()
     position = _resolve_leaps_position(book, identifier)
@@ -1260,10 +1269,19 @@ def leaps_update(
     )
     current_theta = -abs(theta_magnitude) if theta_magnitude is not None else None
 
+    with console.status(f"Fetching current market IV for {position.ticker} from Yahoo..."):
+        market_iv = data.fetch_current_iv(position.ticker, position.option_type, position.strike, position.expiration)
+    if market_iv is not None:
+        console.print(f"[dim]Market IV for this contract (from Yahoo): {market_iv:.1f}%[/dim]")
+    else:
+        console.print("[dim]No matching contract found on Yahoo for this strike/expiration — enter IV manually.[/dim]")
+
     current_iv = _ask_float(
         "Current Implied Volatility (%)",
         example="32.0",
-        default=position.current_iv if position.current_iv is not None else position.entry_iv,
+        default=market_iv if market_iv is not None else (
+            position.current_iv if position.current_iv is not None else position.entry_iv
+        ),
         optional=True,
     )
 
@@ -1271,6 +1289,9 @@ def leaps_update(
     position.current_theta = current_theta
     position.current_iv = current_iv
     position.last_updated = date.today().isoformat()
+    if current_iv is not None:
+        source = "yahoo" if market_iv is not None and abs(current_iv - market_iv) < 0.05 else "manual"
+        position.iv_history.append(IvReading(date=position.last_updated, iv=current_iv, source=source))
     save_leaps(book)
     console.print(f"[green]Updated {position.ticker} (id={position.id}) as of {position.last_updated}.[/green]\n")
 

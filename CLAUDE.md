@@ -584,11 +584,16 @@ Breakeven              = strike + premium                         (CALL)
                         = strike - premium                         (PUT)
 Days to Expiry          = expiration - today
 Position %              = (contracts × premium × 100) / portfolio_value × 100
+Intrinsic Value          = max(0, current_price - strike)                                    (CALL)
+                         = max(0, strike - current_price)                                     (PUT)
+Intrinsic Value %        = Intrinsic Value / current_price × 100
 Theoretical Value        = premium + (current_price - entry_stock_price) × Effective Delta   [requires entry_delta or current_delta]
 Theoretical P&L          = (Theoretical Value - premium) × 100 × contracts
 Profit %                 = (Theoretical Value - premium) / premium × 100
 Accumulated Theta        = days_held × |Effective Theta| × 100 × contracts                   [requires entry_theta or current_theta]
 ```
+
+**Intrinsic Value** is pure math — no Greeks required, just current price vs. strike (e.g. a $250 stock on a $200 strike CALL has $50/share of intrinsic value, 20% of the stock price). It is `None` only when `current_price` is unavailable. Unlike `Theoretical Value` (a delta-based estimate of the option's actual market price, including time value), `Intrinsic Value` is the floor — what the contract would be worth if it expired today with zero time value remaining. Shown per-share (not multiplied by `100 × contracts`), same convention as `Theoretical Value`, in the `LeapsSnapshot`'s "Computed" section (`display.render_leaps_detail`).
 
 Where `Effective Delta` / `Effective Theta` = `current_delta`/`current_theta` if set (via `leaps update`), else `entry_delta`/`entry_theta` — same fallback as `Effective Delta` in the Stock-Equivalent Exposure section below. Theoretical P&L is a simple delta-based estimate, not a live option quote — Greeks that are left blank at `add` time (and never filled in via `leaps update`) leave the corresponding downstream fields as "N/A" rather than erroring.
 
@@ -624,6 +629,8 @@ Return %         = P&L / (premium × 100 × contracts) × 100
 Price points are generated from a fixed set of multipliers on the current (or entry) stock price — `[0.7, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6]` for CALLs, the mirrored descending set for PUTs — plus the strike and breakeven always inserted explicitly, deduped and sorted. "Key Levels" states the 100%-loss threshold, breakeven, and the % move (with direction — "rise" for CALL, "fall" for PUT) needed to break even within the remaining days-to-expiry (shown in months). Two named "+20% / +40% move" scenarios are included as a quick gut-check.
 
 **Early-exit estimate:** reuses the same linear delta approximation as `LeapsSnapshot.theoretical_current_value` (not a new pricing model) — solves `premium + (price - entry_stock_price) × Effective Delta = premium × profit_target_multiplier` for the required stock price, where `Effective Delta` is `current_delta` if set via `leaps update`, else `entry_delta` (same fallback as everywhere else). This **ignores time decay (theta)** entirely and is explicitly labeled a rough guide, not a precise target; it's `None` (with an explanatory message) if neither `current_delta` nor `entry_delta` was recorded. The accompanying "Warning Signs" panel reminds the user to check current IV rank and the next earnings date manually (neither is fetched by this tool) and restates the time-stop date (`expiration − days_before_expiry_exit`).
+
+**Loss-exit scenario (downside alert):** the mirror image of the early-exit estimate — same linear delta approximation, same `Effective Delta` fallback, same theta-ignoring caveat — but solving for the stock price at which the position has lost a fixed fraction of premium rather than gained a multiple of it: `target_value = premium × (1 - loss_pct / 100)`, solved via the identical `premium + (price - entry_stock_price) × Effective Delta = target_value` equation. Two fixed thresholds (`analysis.LOSS_EXIT_THRESHOLDS`), not configurable: **-30% loss** (yellow, "reassess position") and **-50% loss** (red, "immediate exit"). New `LeapsLossExitLevel` dataclass (`loss_pct`, `target_value`, `target_price`, `severity`) and `LeapsScenario.loss_exit_levels` field, computed in `build_leaps_scenario()` and rendered as a "Loss Exit Scenario (Downside Alert)" panel in `display.render_leaps_scenario()`, right after the Early Exit panel — appears automatically in both `leaps add`'s confirmation step and `leaps show` since both already call this function. `target_price` is `None` (with an explanatory line) under the same no-delta-recorded condition as the early-exit price.
 
 ## Rebalancing Logic
 

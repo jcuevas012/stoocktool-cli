@@ -2180,6 +2180,28 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     ))
 
 
+def _leaps_iv_history_lines(position: LeapsPosition) -> list[str]:
+    """Lines for the IV History block: one reading per `leaps add`/`leaps update` run so far.
+
+    yfinance has no historical-IV endpoint, so this can't show the past before the position
+    was opened — only what's been captured (Yahoo market IV where available, else manual
+    entry) since. Builds up a real, if short, series over time.
+    """
+    if not position.iv_history:
+        return ["  No IV history yet — run `stocktool leaps update` over time to start building this up."]
+    lines = []
+    for reading in position.iv_history[-8:]:
+        tag = "[dim](yahoo)[/dim]" if reading.source == "yahoo" else "[dim](manual)[/dim]"
+        lines.append(f"  {reading.date}: {reading.iv:.1f}% {tag}")
+    if len(position.iv_history) > 8:
+        lines.append(f"  [dim]...and {len(position.iv_history) - 8} earlier reading(s) not shown.[/dim]")
+    if len(position.iv_history) >= 2:
+        change = position.iv_history[-1].iv - position.iv_history[-2].iv
+        arrow = "↑" if change > 0 else ("↓" if change < 0 else "→")
+        lines.append(f"  Trend: {arrow} {change:+.1f}pp since previous reading")
+    return lines
+
+
 def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> None:
     """Render a detail panel for a single LEAPS position: entry data plus computed metrics."""
 
@@ -2213,11 +2235,19 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
         f"  Current IV: {position.current_iv:.1f}%" if position.current_iv is not None else "  Current IV: N/A",
         f"  Last updated: {position.last_updated}" if position.last_updated else "  Last updated: never — entry values are the only reading on file",
         "",
+        "[bold cyan]IV History[/bold cyan]",
+        *_leaps_iv_history_lines(position),
+        "",
         "[bold cyan]Computed[/bold cyan]",
         f"  Breakeven: ${snapshot.breakeven:.2f}" if snapshot.breakeven is not None else "  Breakeven: N/A",
         f"  Days to expiry: [{dte_color}]{snapshot.days_to_expiry}[/{dte_color}]" if snapshot.days_to_expiry is not None else "  Days to expiry: N/A",
         f"  Days held: {snapshot.days_held}" if snapshot.days_held is not None else "  Days held: N/A",
         f"  Current stock price: ${snapshot.current_stock_price:.2f}" if snapshot.current_stock_price is not None else "  Current stock price: N/A",
+        (
+            f"  Intrinsic value: ${snapshot.intrinsic_value:.2f} ({snapshot.intrinsic_value_pct:.1f}% of stock price)"
+            if snapshot.intrinsic_value is not None
+            else "  Intrinsic value: N/A (needs current price)"
+        ),
         f"  Theoretical value: ${snapshot.theoretical_current_value:.2f}" if snapshot.theoretical_current_value is not None else "  Theoretical value: N/A (needs a delta — entry or current — + current price)",
         f"  Theoretical P&L: ${snapshot.theoretical_pnl:,.2f}" if snapshot.theoretical_pnl is not None else "  Theoretical P&L: N/A",
         f"  Profit %: [{profit_color}]{snapshot.profit_pct:.1f}%[/{profit_color}]" if snapshot.profit_pct is not None else "  Profit %: N/A",
@@ -2325,6 +2355,27 @@ def render_leaps_scenario(scenario: LeapsScenario) -> None:
     else:
         exit_lines.append("[dim]Enter a delta at purchase to estimate the required stock price for this target.[/dim]")
     console.print(Panel("\n".join(exit_lines), title="[bold magenta]Early Exit Scenario (+Profit Target)[/bold magenta]", border_style="magenta"))
+
+    loss_lines = []
+    for level in scenario.loss_exit_levels:
+        label = "⚠ IMMEDIATE EXIT" if level.severity == "red" else "⚠ Reassess position"
+        loss_lines.append(
+            f"[{level.severity}]-{level.loss_pct:.0f}% loss = contract value drops to ~${level.target_value:.2f} "
+            f"— {label}[/{level.severity}]"
+        )
+        if level.target_price is not None:
+            loss_lines.append(f"  Approx. required {scenario.ticker} price: ~${level.target_price:,.0f}")
+        else:
+            loss_lines.append("  [dim]Enter a delta at purchase to estimate the required stock price.[/dim]")
+    loss_lines.append(
+        "[dim]Rough guide only — linear estimate from delta (current if you've run `leaps update`, "
+        "else entry), ignores time decay (theta). Actual price needed may differ.[/dim]"
+    )
+    console.print(Panel(
+        "\n".join(loss_lines),
+        title="[bold magenta]Loss Exit Scenario (Downside Alert)[/bold magenta]",
+        border_style="red",
+    ))
 
     if scenario.warnings:
         console.print(Panel(

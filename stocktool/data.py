@@ -706,6 +706,26 @@ def fetch_put_candidates(
     return results
 
 
+def fetch_current_iv(ticker: str, option_type: str, strike: float, expiration: str) -> Optional[float]:
+    """Best-effort fetch of the current market-quoted IV (%) for an already-open LEAPS contract,
+    reusing the same `option_chain` lookup as `fetch_leaps_option_context`'s Step 4b contract
+    check. Unlike delta/theta, IV is a field yfinance's option chain actually exposes per
+    contract, so `leaps update` can refresh it from Yahoo instead of relying on manual entry
+    alone. Returns None on any failure (missing contract, network error, etc.) — never raises.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        chain = t.option_chain(expiration)
+        contracts_df = chain.calls if option_type == "CALL" else chain.puts
+        row = contracts_df[contracts_df["strike"] == strike]
+        if row.empty:
+            return None
+        iv = _safe_float(row.iloc[0].get("impliedVolatility"))
+        return iv * 100 if iv is not None else None  # fraction -> percent
+    except Exception:
+        return None
+
+
 def fetch_leaps_option_context(
     ticker: str, option_type: str, strike: float, expiration: str
 ) -> dict:
