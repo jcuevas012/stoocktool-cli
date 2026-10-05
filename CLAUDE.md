@@ -590,12 +590,14 @@ Intrinsic Value %        = Intrinsic Value / current_price × 100
 Theoretical Value        = premium + (current_price - entry_stock_price) × Effective Delta   [requires entry_delta or current_delta]
 Theoretical P&L          = (Theoretical Value - premium) × 100 × contracts
 Profit %                 = (Theoretical Value - premium) / premium × 100
-Accumulated Theta        = days_held × |Effective Theta| × 100 × contracts                   [requires entry_theta or current_theta]
+Accumulated Theta        = days_held × |Effective Theta|                                      [requires entry_theta or current_theta]
 ```
 
 **Intrinsic Value** is pure math — no Greeks required, just current price vs. strike (e.g. a $250 stock on a $200 strike CALL has $50/share of intrinsic value, 20% of the stock price). It is `None` only when `current_price` is unavailable. Unlike `Theoretical Value` (a delta-based estimate of the option's actual market price, including time value), `Intrinsic Value` is the floor — what the contract would be worth if it expired today with zero time value remaining. Shown per-share (not multiplied by `100 × contracts`), same convention as `Theoretical Value`, in the `LeapsSnapshot`'s "Computed" section (`display.render_leaps_detail`).
 
 Where `Effective Delta` / `Effective Theta` = `current_delta`/`current_theta` if set (via `leaps update`), else `entry_delta`/`entry_theta` — same fallback as `Effective Delta` in the Stock-Equivalent Exposure section below. Theoretical P&L is a simple delta-based estimate, not a live option quote — Greeks that are left blank at `add` time (and never filled in via `leaps update`) leave the corresponding downstream fields as "N/A" rather than erroring.
+
+**Theta units — position-level $/day, not a per-share Greek:** `entry_theta`/`current_theta` store the full position's dollar decay per day exactly as most brokers display it (e.g. thinkorswim's "Position Theta" / "P.Theta" column — already includes the 100-share multiplier and the contract count), not the raw per-contract-of-one-share Greek. The wizard and `leaps update` prompt for this directly (`cli._ask_float("Position theta per day...")`, example `4.999`) so you can copy the number straight off your broker's screen with no mental conversion — type in `-4.999` as magnitude `4.999`. This is why `Accumulated Theta` above has no `× 100 × contracts` term: it's already baked into the stored value.
 
 **Color thresholds:** Days-to-expiry — red once inside the 90-day default time-stop window (`LEAPS_DEFAULT_TIME_STOP_DAYS`), else green. Profit % — green at/above the position's profit target (`(profit_target_multiplier - 1) × 100`), yellow while positive but below target, red when negative. Delta (`analysis.leaps_delta_color()`) — green in the 0.75–0.85 sweet spot, yellow in the 0.70–0.90 warn band outside that spot, red/dim otherwise.
 

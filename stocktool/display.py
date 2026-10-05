@@ -2240,7 +2240,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
             if position.entry_delta is not None
             else "  Delta: N/A"
         ),
-        f"  Theta: {position.entry_theta if position.entry_theta is not None else 'N/A'}",
+        f"  Theta: -${abs(position.entry_theta):.2f}/day" if position.entry_theta is not None else "  Theta: N/A",
         f"  IV: {position.entry_iv if position.entry_iv is not None else 'N/A'}%",
         "",
         "[bold cyan]Monitoring (last `leaps update`)[/bold cyan]",

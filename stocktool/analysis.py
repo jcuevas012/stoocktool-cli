@@ -1521,9 +1521,12 @@ def build_leaps_snapshot(
         if premium:
             profit_pct = (theoretical_current_value - premium) / premium * 100
 
+    # effective_theta is the full POSITION's $/day decay (broker's Position Theta / P.Theta
+    # reading, already including the 100-share multiplier and contract count) — not a per-share
+    # Greek — so no further multiplication by 100 or contracts here.
     accumulated_theta = None
     if effective_theta is not None:
-        accumulated_theta = days_held * abs(effective_theta) * 100 * position.contracts
+        accumulated_theta = days_held * abs(effective_theta)
 
     # Stock-equivalent exposure also uses effective_delta (computed above) since it reflects
     # *today's* real market exposure, not the exposure at entry.

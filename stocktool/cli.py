@@ -1069,8 +1069,14 @@ def leaps_add() -> None:
         else:
             console.print(f"[yellow]Delta {entry_delta:.2f} is deep ITM but outside the 0.75-0.85 sweet spot.[/yellow]")
 
-    # Step 7: theta at purchase (optional)
-    theta_magnitude = _ask_float("Theta per day (magnitude $)", example="0.03", optional=True)
+    # Step 7: theta at purchase (optional) — position-level $/day for the FULL position
+    # (all contracts), matching your broker's "Position Theta" / "P.Theta" reading directly —
+    # not the raw per-share Greek. Copy the number straight off your broker's screen.
+    theta_magnitude = _ask_float(
+        "Position theta per day (magnitude $ — your broker's Position Theta / P.Theta, e.g. 4.999)",
+        example="4.999",
+        optional=True,
+    )
     entry_theta: Optional[float] = -abs(theta_magnitude) if theta_magnitude is not None else None
     if entry_theta is not None:
         console.print(f"Monthly theta cost: ${abs(entry_theta) * 30:,.2f}")
@@ -1270,8 +1276,8 @@ def leaps_update(
             console.print(f"[red]⚠️ Delta {current_delta:.2f} has drifted out of LEAPS range — this position is behaving less like stock. Review your exit plan.[/red]")
 
     theta_magnitude = _ask_float(
-        "Current theta per day (magnitude $)",
-        example="0.04",
+        "Current position theta per day (magnitude $ — your broker's Position Theta / P.Theta, e.g. 4.999)",
+        example="4.999",
         default=abs(position.current_theta) if position.current_theta is not None else (abs(position.entry_theta) if position.entry_theta is not None else None),
         optional=True,
     )
