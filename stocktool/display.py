@@ -10,7 +10,7 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    LeapsSnapshot, LeapsScenario, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
+    LeapsSnapshot, LeapsScenario, LeapsGammaCurve, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
     leaps_leverage_color, leaps_exposure_color, leaps_decay_color,
 )
@@ -2318,6 +2318,81 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
         "\n".join(lines),
         title=f"[bold magenta]LEAPS Position: {position.ticker}[/bold magenta]",
         border_style="magenta",
+    ))
+
+
+def render_leaps_gamma_chart(
+    curve: Optional[LeapsGammaCurve],
+    broker_delta: Optional[float],
+    broker_delta_label: str,
+    unavailable_reason: Optional[str] = None,
+) -> None:
+    """Render a compact terminal plot of modeled delta across underlying prices."""
+    if curve is None:
+        reason = unavailable_reason or "Required market inputs are unavailable."
+        console.print(Panel(
+            f"[dim]Gamma / theoretical delta chart unavailable: {reason} "
+            "Broker-entered delta and exposure calculations are unchanged.[/dim]",
+            title="[bold cyan]LEAPS Gamma and Delta[/bold cyan]",
+            border_style="cyan",
+        ))
+        return
+
+    low_delta, high_delta = ((0.0, 1.0) if curve.option_type == "CALL" else (-1.0, 0.0))
+    plot_height, plot_width = 9, 41
+    grid = [[" " for _ in range(plot_width)] for _ in range(plot_height)]
+    first_price, last_price = curve.points[0].stock_price, curve.points[-1].stock_price
+    samples = curve.points
+    sample_columns = {
+        round(index * (plot_width - 1) / (len(samples) - 1))
+        for index in range(len(samples))
+    }
+    previous_row = None
+    for column in range(plot_width):
+        price = first_price + (last_price - first_price) * column / (plot_width - 1)
+        for left, right in zip(samples, samples[1:]):
+            if left.stock_price <= price <= right.stock_price:
+                portion = (price - left.stock_price) / (right.stock_price - left.stock_price)
+                delta = left.delta + portion * (right.delta - left.delta)
+                break
+        else:
+            delta = samples[-1].delta
+        row = round((high_delta - delta) / (high_delta - low_delta) * (plot_height - 1))
+        row = max(0, min(plot_height - 1, row))
+        if column in sample_columns:
+            grid[row][column] = "◆" if column == plot_width // 2 else "●"
+        elif previous_row is not None:
+            connector = "─" if row == previous_row else ("╱" if row < previous_row else "╲")
+            grid[row][column] = connector
+        previous_row = row
+
+    lines = [
+        f"Black–Scholes delta at ${curve.spot:,.2f}: [bold]{curve.model_delta:+.3f}[/bold]  ·  "
+        f"Gamma: [bold]{curve.gamma:.5f} delta / $1[/bold]"
+    ]
+    if broker_delta is not None:
+        lines.append(f"Broker-entered delta ({broker_delta_label}): {broker_delta:+.3f}  ·  model remains separate")
+    for row_index, cells in enumerate(grid):
+        axis_delta = high_delta - row_index * (high_delta - low_delta) / (plot_height - 1)
+        lines.append(f"{axis_delta:+.3f} │" + "".join(cells))
+    lines.extend([
+        f"     ${first_price:,.2f}  " + " " * 9 + f"◆ ${curve.spot:,.2f} current " + " " * 6 + f"${last_price:,.2f}",
+        f"Near spot: +$1 stock ≈ {curve.gamma:+.5f} delta; -$1 ≈ {-curve.gamma:+.5f}. "
+        f"+$5 ≈ {curve.gamma * 5:+.5f}; -$5 ≈ {-curve.gamma * 5:+.5f} delta (gamma × stock move).",
+        f"Inputs: IV {curve.implied_volatility_pct:.2f}% ({curve.iv_source}); "
+        f"risk-free {curve.risk_free_rate_pct:.2f}% ({curve.risk_free_source}); "
+        f"dividend yield {curve.dividend_yield_pct:.2f}% ({curve.dividend_source}); "
+        f"spot ${curve.spot:.2f} (Yahoo close {curve.spot_as_of or 'date unavailable'}); "
+        f"{curve.days_to_expiry} days to expiry.",
+        "[dim]What-if curve across ±20% stock price; holds IV, time, rates, and yield fixed. "
+        "European Black–Scholes approximation; gamma is the local slope. Positive gamma means "
+        "call delta rises with stock price and put delta moves toward zero. Broker delta remains "
+        "the exposure input.[/dim]",
+    ])
+    console.print(Panel(
+        "\n".join(lines),
+        title=f"[bold cyan]LEAPS Gamma and Delta · {curve.ticker} {curve.option_type}[/bold cyan]",
+        border_style="cyan",
     ))
 
 

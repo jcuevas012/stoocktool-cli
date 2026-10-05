@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -1335,6 +1336,128 @@ def _score_return(r: Optional[float]) -> str:
 
 
 # --- LEAPS tracking ---
+
+
+@dataclass
+class LeapsGammaPoint:
+    stock_price: float
+    delta: float
+
+
+@dataclass
+class LeapsGammaCurve:
+    """Black–Scholes delta curve for a LEAPS contract at fixed model inputs."""
+    ticker: str
+    option_type: str
+    spot: float
+    model_delta: float
+    gamma: float  # change in delta per $1 underlying move
+    implied_volatility_pct: float
+    risk_free_rate_pct: float
+    dividend_yield_pct: float
+    days_to_expiry: int
+    iv_source: str
+    risk_free_source: str
+    dividend_source: str
+    spot_as_of: Optional[str] = None
+    points: list[LeapsGammaPoint] = field(default_factory=list)
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def _black_scholes_delta_gamma(
+    option_type: str,
+    stock_price: float,
+    strike: float,
+    years_to_expiry: float,
+    volatility: float,
+    risk_free_rate: float,
+    dividend_yield: float,
+) -> tuple[float, float]:
+    """Return European Black–Scholes delta and gamma using continuous rates/yield."""
+    if min(stock_price, strike, years_to_expiry, volatility) <= 0:
+        raise ValueError("stock price, strike, time, and volatility must be positive")
+    root_t = math.sqrt(years_to_expiry)
+    d1 = (
+        math.log(stock_price / strike)
+        + (risk_free_rate - dividend_yield + 0.5 * volatility**2) * years_to_expiry
+    ) / (volatility * root_t)
+    discounted_dividend = math.exp(-dividend_yield * years_to_expiry)
+    if option_type.upper() == "CALL":
+        delta = discounted_dividend * _normal_cdf(d1)
+    elif option_type.upper() == "PUT":
+        delta = discounted_dividend * (_normal_cdf(d1) - 1.0)
+    else:
+        raise ValueError("option_type must be CALL or PUT")
+    gamma = discounted_dividend * math.exp(-0.5 * d1**2) / (
+        stock_price * volatility * root_t * math.sqrt(2.0 * math.pi)
+    )
+    return delta, gamma
+
+
+def build_leaps_gamma_curve(
+    position: LeapsPosition,
+    stock_price: Optional[float],
+    implied_volatility_pct: Optional[float],
+    risk_free_rate_pct: Optional[float],
+    dividend_yield_pct: Optional[float],
+    *,
+    iv_source: str = "Yahoo option chain",
+    risk_free_source: str = "Yahoo ^TNX 10-year Treasury yield",
+    dividend_source: str = "Yahoo ticker dividend yield",
+    spot_as_of: Optional[str] = None,
+    price_range_pct: float = 20.0,
+    point_count: int = 9,
+) -> Optional[LeapsGammaCurve]:
+    """Build a delta-versus-stock-price curve. Returns None when model inputs are unavailable.
+
+    The curve holds IV, rates, dividend yield, and time to expiry fixed at their current
+    readings. Gamma is local curvature: approximately how much delta changes per $1 stock move.
+    """
+    inputs = (stock_price, implied_volatility_pct, risk_free_rate_pct, dividend_yield_pct)
+    if any(value is None or not math.isfinite(float(value)) for value in inputs):
+        return None
+    if point_count < 3 or point_count % 2 == 0 or price_range_pct <= 0:
+        raise ValueError("point_count must be odd and at least 3; price_range_pct must be positive")
+
+    days_to_expiry = (date.fromisoformat(position.expiration) - date.today()).days
+    if days_to_expiry <= 0 or stock_price <= 0 or position.strike <= 0 or implied_volatility_pct <= 0:
+        return None
+    years = days_to_expiry / 365.0
+    volatility = implied_volatility_pct / 100.0
+    risk_free = risk_free_rate_pct / 100.0
+    dividend_yield = dividend_yield_pct / 100.0
+    model_delta, gamma = _black_scholes_delta_gamma(
+        position.option_type, stock_price, position.strike, years, volatility, risk_free, dividend_yield
+    )
+
+    points: list[LeapsGammaPoint] = []
+    for index in range(point_count):
+        offset_pct = -price_range_pct + 2 * price_range_pct * index / (point_count - 1)
+        scenario_price = stock_price * (1 + offset_pct / 100.0)
+        scenario_delta, _ = _black_scholes_delta_gamma(
+            position.option_type, scenario_price, position.strike, years, volatility, risk_free, dividend_yield
+        )
+        points.append(LeapsGammaPoint(stock_price=scenario_price, delta=scenario_delta))
+
+    return LeapsGammaCurve(
+        ticker=position.ticker,
+        option_type=position.option_type,
+        spot=stock_price,
+        model_delta=model_delta,
+        gamma=gamma,
+        implied_volatility_pct=implied_volatility_pct,
+        risk_free_rate_pct=risk_free_rate_pct,
+        dividend_yield_pct=dividend_yield_pct,
+        days_to_expiry=days_to_expiry,
+        iv_source=iv_source,
+        risk_free_source=risk_free_source,
+        dividend_source=dividend_source,
+        spot_as_of=spot_as_of,
+        points=points,
+    )
 
 @dataclass
 class LeapsSnapshot:

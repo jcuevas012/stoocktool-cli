@@ -764,6 +764,68 @@ def fetch_leaps_option_quote(ticker: str, option_type: str, strike: float, expir
     return result
 
 
+def fetch_leaps_gamma_inputs(ticker: str) -> dict:
+    """Fetch disclosed Black–Scholes rate and dividend-yield inputs for LEAPS gamma.
+
+    Yahoo's ^TNX close is used as a 10-year Treasury yield proxy. Yahoo's dividendYield
+    uses this project's documented percentage-point convention (0.39 means 0.39%);
+    the alternate `yield` and trailingAnnualDividendYield fields are fractions.
+    Missing inputs remain missing so callers can explain why the model is unavailable.
+    """
+    from datetime import datetime
+
+    result: dict = {"retrieved_at": datetime.now().astimezone().isoformat(timespec="minutes")}
+    try:
+        ticker_obj = yf.Ticker(ticker)
+    except Exception:
+        ticker_obj = None
+    try:
+        history = ticker_obj.history(period="5d") if ticker_obj is not None else None
+        if history is not None and not history.empty and "Close" in history:
+            closes = history["Close"].dropna()
+            if not closes.empty:
+                spot = _safe_float(closes.iloc[-1])
+                if spot is not None and spot > 0:
+                    result["stock_price"] = spot
+                    result["stock_price_as_of"] = closes.index[-1].date().isoformat()
+    except Exception:
+        pass
+
+    try:
+        info = ticker_obj.info if ticker_obj is not None else None
+        if isinstance(info, dict):
+            dividend_yield = _safe_float(info.get("dividendYield"))
+            if dividend_yield is not None and 0 <= dividend_yield <= 100:
+                result["dividend_yield_pct"] = dividend_yield
+                result["dividend_source"] = "Yahoo dividendYield"
+            else:
+                for key in ("yield", "trailingAnnualDividendYield"):
+                    fraction = _safe_float(info.get(key))
+                    if fraction is not None and 0 <= fraction <= 1:
+                        result["dividend_yield_pct"] = fraction * 100
+                        result["dividend_source"] = f"Yahoo {key} (fraction converted to percent)"
+                        break
+                if "dividend_yield_pct" not in result and _safe_float(info.get("dividendRate")) == 0:
+                    result["dividend_yield_pct"] = 0.0
+                    result["dividend_source"] = "Yahoo dividendRate confirms no dividend"
+    except Exception:
+        pass
+
+    try:
+        history = yf.Ticker("^TNX").history(period="5d")
+        if history is not None and not history.empty and "Close" in history:
+            closes = history["Close"].dropna()
+            if not closes.empty:
+                rate = _safe_float(closes.iloc[-1])
+                if rate is not None and -5 <= rate <= 25:
+                    result["risk_free_rate_pct"] = rate
+                    result["risk_free_source"] = "Yahoo ^TNX 10-year Treasury yield"
+                    result["risk_free_as_of"] = closes.index[-1].date().isoformat()
+    except Exception:
+        pass
+    return result
+
+
 def fetch_leaps_option_context(
     ticker: str, option_type: str, strike: float, expiration: str
 ) -> dict:
