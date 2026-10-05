@@ -726,6 +726,44 @@ def fetch_current_iv(ticker: str, option_type: str, strike: float, expiration: s
         return None
 
 
+def fetch_leaps_option_quote(ticker: str, option_type: str, strike: float, expiration: str) -> dict:
+    """Fetch one LEAPS contract's two-sided quote, IV, and last-trade timestamp.
+
+    A midpoint is returned as the indicative mark only for a positive, non-crossed
+    bid/ask. It is not an executable fill price. Missing/stale last-trade data is
+    exposed separately and never substituted for a current two-sided mark.
+    """
+    from datetime import datetime
+
+    result = {"retrieved_at": datetime.now().astimezone().isoformat(timespec="minutes")}
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        chain = ticker_obj.option_chain(expiration)
+        contracts = chain.calls if option_type == "CALL" else chain.puts
+        match = contracts[contracts["strike"] == strike]
+        if match.empty:
+            return result
+        row = match.iloc[0]
+        bid = _safe_float(row.get("bid"))
+        ask = _safe_float(row.get("ask"))
+        iv = _safe_float(row.get("impliedVolatility"))
+        last_trade = row.get("lastTradeDate")
+        if bid is not None:
+            result["bid"] = bid
+        if ask is not None:
+            result["ask"] = ask
+        if bid is not None and ask is not None and 0 < bid <= ask:
+            result["mid"] = round((bid + ask) / 2, 4)
+            result["spread_pct"] = ((ask - bid) / ((ask + bid) / 2) * 100) if ask + bid else None
+        if iv is not None:
+            result["implied_volatility"] = iv * 100
+        if last_trade is not None and hasattr(last_trade, "isoformat"):
+            result["last_trade_at"] = last_trade.isoformat()
+    except Exception:
+        pass
+    return result
+
+
 def fetch_leaps_option_context(
     ticker: str, option_type: str, strike: float, expiration: str
 ) -> dict:
@@ -741,6 +779,7 @@ def fetch_leaps_option_context(
 
     result: dict = {}
     t = yf.Ticker(ticker)
+    result["quote_retrieved_at"] = datetime.now().astimezone().isoformat(timespec="minutes")
 
     # Contract bid/ask/IV for the exact strike + expiration the user already chose.
     try:
@@ -755,8 +794,10 @@ def fetch_leaps_option_context(
                 result["bid"] = bid
             if ask is not None:
                 result["ask"] = ask
-            if bid is not None and ask is not None and bid > 0 and ask > 0:
+            if bid is not None and ask is not None and 0 < bid <= ask:
                 result["mid"] = round((bid + ask) / 2, 2)
+                midpoint = (bid + ask) / 2
+                result["spread_pct"] = (ask - bid) / midpoint * 100 if midpoint else None
             iv = _safe_float(row.get("impliedVolatility"))
             if iv is not None:
                 result["implied_volatility"] = iv * 100  # fraction -> percent

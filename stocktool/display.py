@@ -2123,7 +2123,7 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     table.add_column("Expiration")
     table.add_column("DTE", justify="right")
     table.add_column("Premium", justify="right")
-    table.add_column("Theo. P&L", justify="right")
+    table.add_column("P&L", justify="right")
     table.add_column("Profit %", justify="right")
     table.add_column("Leverage", justify="right")
     table.add_column("Status")
@@ -2154,7 +2154,7 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     lines = [f"[bold]Active positions:[/bold] {len(active)}"]
     if any(s.theoretical_pnl is not None for s in active):
         pnl_color = "green" if total_pnl >= 0 else "red"
-        lines.append(f"[bold]Total theoretical P&L:[/bold] [{pnl_color}]${total_pnl:,.0f}[/{pnl_color}]")
+        lines.append(f"[bold]Total active estimate P&L:[/bold] [{pnl_color}]${total_pnl:,.0f}[/{pnl_color}]")
     nearing_exit = [s for s in active if s.days_to_expiry is not None and leaps_dte_color(s.days_to_expiry) == "red"]
     if nearing_exit:
         tickers_str = ", ".join(s.ticker for s in nearing_exit)
@@ -2175,7 +2175,7 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     if decaying:
         tickers_str = ", ".join(s.ticker for s in decaying)
         lines.append(f"[bold red]In accelerated decay zone:[/bold red] {tickers_str} — theta now eroding value faster each week")
-    lines.append("[dim]Theoretical P&L is a delta-based estimate from entry Greeks, not a live option quote.[/dim]")
+    lines.append("[dim]Active P&L uses a current Yahoo bid/ask midpoint when available; otherwise it is a rough entry-delta estimate. Closed P&L is realized only when a close price was recorded. Midpoint is not an executable fill.[/dim]")
 
     console.print(Panel(
         "\n".join(lines),
@@ -2226,6 +2226,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
     dte_color = leaps_dte_color(snapshot.days_to_expiry)
     profit_color = leaps_profit_color(snapshot.profit_pct, position.profit_target_multiplier)
     status_str = "[green]ACTIVE[/green]" if position.status == "ACTIVE" else "[dim]CLOSED[/dim]"
+    pnl_method = snapshot.valuation_method if position.status == "ACTIVE" else "realized close price"
 
     lines = [
         f"[bold]{position.ticker} {position.option_type} ${position.strike:.2f}[/bold]  exp {position.expiration}  (id={position.id})",
@@ -2267,11 +2268,13 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
             if snapshot.intrinsic_value is not None
             else "  Intrinsic value: N/A (needs current price)"
         ),
-        f"  Theoretical value: ${snapshot.theoretical_current_value:.2f}" if snapshot.theoretical_current_value is not None else "  Theoretical value: N/A (needs a delta — entry or current — + current price)",
-        f"  Theoretical P&L: ${snapshot.theoretical_pnl:,.2f}" if snapshot.theoretical_pnl is not None else "  Theoretical P&L: N/A",
+        f"  Current option value: ${snapshot.theoretical_current_value:.2f} ({snapshot.valuation_method})" if snapshot.theoretical_current_value is not None and position.status == "ACTIVE" else "  Current option value: N/A",
+        f"  Quote retrieved: {snapshot.quote_retrieved_at or 'N/A'} (Yahoo; midpoint is indicative, not an execution price)" if position.status == "ACTIVE" else "",
+        f"  Last contract trade: {snapshot.last_trade_at or 'N/A'}" if position.status == "ACTIVE" else "",
+        f"  {'Realized' if position.status == 'CLOSED' else 'Estimated'} P&L: ${snapshot.theoretical_pnl:,.2f}" if snapshot.theoretical_pnl is not None else f"  {'Realized' if position.status == 'CLOSED' else 'Estimated'} P&L: N/A",
         f"  Profit %: [{profit_color}]{snapshot.profit_pct:.1f}%[/{profit_color}]" if snapshot.profit_pct is not None else "  Profit %: N/A",
-        f"  Accumulated theta: ${snapshot.accumulated_theta:,.2f}" if snapshot.accumulated_theta is not None else "  Accumulated theta: N/A (needs a theta — entry or current)",
-        "[dim]Theoretical value/P&L/Profit %/Accumulated theta use current delta/theta when you've run `leaps update`, else fall back to entry delta/theta.[/dim]",
+        f"  Current theta 30-day run-rate: ~${snapshot.theta_30d_run_rate:,.2f}" if snapshot.theta_30d_run_rate is not None else "  Current theta 30-day run-rate: N/A",
+        f"[dim]P&L method: {pnl_method or 'unavailable'}; theta run-rate multiplies the latest known position theta by 30 and is not cumulative theta paid.[/dim]",
         f"  Position size (cash at risk): {snapshot.position_pct:.2f}% of portfolio" if snapshot.position_pct is not None else "  Position size (cash at risk): N/A",
         "",
         "[bold cyan]Stock-Equivalent Exposure[/bold cyan]",
@@ -2295,7 +2298,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
             if snapshot.leverage_ratio is not None
             else "  Leverage ratio: N/A (needs delta + current price)"
         ),
-        "[dim]Uses current delta when you've run `leaps update`, else falls back to entry delta.[/dim]",
+        "[dim]Exposure uses signed delta (PUTs are negative); position-size percentage and leverage show absolute magnitude.[/dim]",
         "",
         "[bold cyan]Exit Rules[/bold cyan]",
         f"  Profit target: {position.profit_target_multiplier}x (+{(position.profit_target_multiplier - 1) * 100:.0f}%)",
@@ -2308,7 +2311,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
             "[bold cyan]Close[/bold cyan]",
             f"  Closed at: {position.closed_at}",
             f"  Close price: ${position.close_price:.2f}" if position.close_price is not None else "  Close price: N/A",
-            f"  Realized P&L: ${position.realized_pnl:,.2f}" if position.realized_pnl is not None else "  Realized P&L: N/A",
+            f"  Realized P&L: ${position.realized_pnl:,.2f}" if position.realized_pnl is not None else "  Realized P&L: N/A (close price was not recorded)",
         ]
 
     console.print(Panel(
@@ -2344,6 +2347,13 @@ def render_leaps_scenario(scenario: LeapsScenario) -> None:
 
     console.print(table)
 
+    if scenario.current_option_value is not None:
+        console.print(
+            f"[dim]Early-exit estimates are anchored to current stock price ${scenario.base_price:.2f} "
+            f"and option value ${scenario.current_option_value:.2f} ({scenario.current_value_source}); "
+            "the delta approximation omits theta, IV, and gamma changes.[/dim]"
+        )
+
     lines = []
     loss_side = "At/below" if scenario.option_type == "CALL" else "At/above"
     lines.append(f"[red]{loss_side} ${scenario.strike:.2f} at expiry: 100% LOSS (-${scenario.total_cost:,.0f})[/red]")
@@ -2368,8 +2378,8 @@ def render_leaps_scenario(scenario: LeapsScenario) -> None:
     if scenario.early_exit_target_price is not None:
         exit_lines.append(f"Approx. required {scenario.ticker} price: ~${scenario.early_exit_target_price:,.0f}")
         exit_lines.append(
-            "[dim]Rough guide only — linear estimate from delta (current if you've run `leaps update`, "
-            "else entry), ignores time decay (theta). Actual price needed may differ.[/dim]"
+            "[dim]Rough guide from the current price/value anchor and signed delta (current if available, "
+            "else entry); omits theta, IV, and gamma changes. Actual price needed may differ.[/dim]"
         )
     else:
         exit_lines.append("[dim]Enter a delta at purchase to estimate the required stock price for this target.[/dim]")
@@ -2387,8 +2397,8 @@ def render_leaps_scenario(scenario: LeapsScenario) -> None:
         else:
             loss_lines.append("  [dim]Enter a delta at purchase to estimate the required stock price.[/dim]")
     loss_lines.append(
-        "[dim]Rough guide only — linear estimate from delta (current if you've run `leaps update`, "
-        "else entry), ignores time decay (theta). Actual price needed may differ.[/dim]"
+        "[dim]Rough guide from the current price/value anchor and signed delta (current if available, "
+        "else entry); omits theta, IV, and gamma changes. Actual price needed may differ.[/dim]"
     )
     console.print(Panel(
         "\n".join(loss_lines),

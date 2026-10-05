@@ -1352,6 +1352,11 @@ class LeapsSnapshot:
     entry_iv: Optional[float]
     status: str
     current_stock_price: Optional[float] = None
+    current_option_mark: Optional[float] = None
+    mark_source: Optional[str] = None
+    quote_retrieved_at: Optional[str] = None
+    last_trade_at: Optional[str] = None
+    valuation_method: Optional[str] = None
     current_delta: Optional[float] = None
     current_theta: Optional[float] = None
     current_iv: Optional[float] = None
@@ -1367,13 +1372,14 @@ class LeapsSnapshot:
     intrinsic_value_pct: Optional[float] = None
     theoretical_current_value: Optional[float] = None
     theoretical_pnl: Optional[float] = None
-    accumulated_theta: Optional[float] = None
+    theta_30d_run_rate: Optional[float] = None
     profit_pct: Optional[float] = None
     # --- stock-equivalent exposure (value-investor "LEAPS as stock substitute" view) ---
     effective_shares: Optional[float] = None
     effective_exposure: Optional[float] = None
     effective_position_pct: Optional[float] = None
     leverage_ratio: Optional[float] = None
+    realized_pnl: Optional[float] = None
 
 
 def leaps_dte_color(days_to_expiry: Optional[int]) -> str:
@@ -1427,14 +1433,23 @@ def leaps_profit_color(profit_pct: Optional[float], profit_target_multiplier: fl
 
 
 def leaps_delta_color(delta: Optional[float]) -> str:
-    """Jorge's Rule sweet spot: green 0.75-0.85, yellow 0.70-0.75 / 0.85-0.90, red otherwise."""
+    """Color by delta magnitude; callers retain the sign for directional exposure math."""
     if delta is None:
         return "dim"
+    delta = abs(delta)
     if 0.75 <= delta <= 0.85:
         return "green"
     if 0.70 <= delta < 0.75 or 0.85 < delta <= 0.90:
         return "yellow"
     return "red"
+
+
+def _signed_leaps_delta(option_type: str, delta: Optional[float]) -> Optional[float]:
+    """Normalize stored deltas to standard option signs, including legacy positive PUT inputs."""
+    if delta is None:
+        return None
+    magnitude = abs(delta)
+    return -magnitude if option_type.upper() == "PUT" else magnitude
 
 
 def leaps_leverage_color(leverage_ratio: Optional[float]) -> str:
@@ -1478,7 +1493,12 @@ def build_leaps_snapshot(
     position: LeapsPosition,
     current_price: Optional[float],
     portfolio_value: Optional[float] = None,
+    option_quote: Optional[dict] = None,
 ) -> LeapsSnapshot:
+    option_quote = option_quote or {}
+    is_active = position.status == "ACTIVE"
+    if not is_active:
+        current_price = None
     strike, premium = position.strike, position.premium
     breakeven = strike + premium if position.option_type == "CALL" else strike - premium
 
@@ -1493,7 +1513,7 @@ def build_leaps_snapshot(
     )
 
     position_pct = None
-    if portfolio_value:
+    if portfolio_value and is_active:
         position_pct = (position.contracts * premium * 100) / portfolio_value * 100
 
     intrinsic_value = None
@@ -1505,28 +1525,43 @@ def build_leaps_snapshot(
         if current_price:
             intrinsic_value_pct = intrinsic_value / current_price * 100
 
-    # Use the freshest delta/theta available: a `leaps update` refresh takes priority over the
-    # fixed entry reading, since theoretical value/P&L/accumulated theta are meant to reflect
-    # *today's* option behavior, not entry-day assumptions. Falls back to entry_delta/entry_theta
-    # when no `leaps update` has been recorded yet (same fallback pattern used throughout).
-    effective_delta = position.current_delta if position.current_delta is not None else position.entry_delta
+    # Current delta is appropriate for today's exposure, but not for repricing the full
+    # move since entry. Without a current option mark, use entry delta only as a rough
+    # first-order estimate of value since purchase.
+    entry_delta = _signed_leaps_delta(position.option_type, position.entry_delta)
+    current_delta = _signed_leaps_delta(position.option_type, position.current_delta)
+    effective_delta = current_delta if current_delta is not None else entry_delta
     effective_theta = position.current_theta if position.current_theta is not None else position.entry_theta
 
     theoretical_current_value = None
     theoretical_pnl = None
     profit_pct = None
-    if effective_delta is not None and current_price is not None:
-        theoretical_current_value = premium + (current_price - position.entry_stock_price) * effective_delta
+    option_mark = option_quote.get("mid") if is_active else None
+    valuation_method = None
+    if option_mark is not None:
+        theoretical_current_value = max(0.0, float(option_mark))
+        valuation_method = "Yahoo bid/ask midpoint"
+    elif entry_delta is not None and current_price is not None and is_active:
+        estimate = premium + (current_price - position.entry_stock_price) * entry_delta
+        intrinsic_now = (
+            max(0.0, current_price - strike) if position.option_type == "CALL"
+            else max(0.0, strike - current_price)
+        )
+        theoretical_current_value = max(0.0, intrinsic_now, estimate)
+        valuation_method = "rough entry-delta estimate; time value and changing Greeks omitted"
+    if theoretical_current_value is not None:
         theoretical_pnl = (theoretical_current_value - premium) * 100 * position.contracts
         if premium:
             profit_pct = (theoretical_current_value - premium) / premium * 100
+    elif not is_active and position.realized_pnl is not None:
+        theoretical_pnl = position.realized_pnl
+        profit_pct = (position.realized_pnl / (premium * 100 * position.contracts) * 100
+                      if premium and position.contracts else None)
 
     # effective_theta is the full POSITION's $/day decay (broker's Position Theta / P.Theta
     # reading, already including the 100-share multiplier and contract count) — not a per-share
     # Greek — so no further multiplication by 100 or contracts here.
-    accumulated_theta = None
-    if effective_theta is not None:
-        accumulated_theta = days_held * abs(effective_theta)
+    theta_30d_run_rate = abs(effective_theta) * 30 if effective_theta is not None and is_active else None
 
     # Stock-equivalent exposure also uses effective_delta (computed above) since it reflects
     # *today's* real market exposure, not the exposure at entry.
@@ -1534,14 +1569,14 @@ def build_leaps_snapshot(
     effective_exposure = None
     effective_position_pct = None
     leverage_ratio = None
-    if effective_delta is not None:
+    if effective_delta is not None and is_active:
         effective_shares = effective_delta * 100 * position.contracts
         if current_price is not None:
             effective_exposure = effective_shares * current_price
             if portfolio_value:
-                effective_position_pct = effective_exposure / portfolio_value * 100
-            if theoretical_current_value:
-                leverage_ratio = (effective_delta * current_price) / theoretical_current_value
+                effective_position_pct = abs(effective_exposure) / portfolio_value * 100
+            if theoretical_current_value and theoretical_current_value > 0:
+                leverage_ratio = abs(effective_delta * current_price) / theoretical_current_value
 
     return LeapsSnapshot(
         id=position.id,
@@ -1552,12 +1587,17 @@ def build_leaps_snapshot(
         premium=premium,
         contracts=position.contracts,
         entry_stock_price=position.entry_stock_price,
-        entry_delta=position.entry_delta,
+        entry_delta=entry_delta,
         entry_theta=position.entry_theta,
         entry_iv=position.entry_iv,
         status=position.status,
         current_stock_price=current_price,
-        current_delta=position.current_delta,
+        current_option_mark=option_mark,
+        mark_source="Yahoo bid/ask midpoint" if option_mark is not None else None,
+        quote_retrieved_at=option_quote.get("retrieved_at") if is_active else None,
+        last_trade_at=option_quote.get("last_trade_at") if is_active else None,
+        valuation_method=valuation_method,
+        current_delta=current_delta,
         current_theta=position.current_theta,
         current_iv=position.current_iv,
         last_updated=position.last_updated,
@@ -1571,12 +1611,13 @@ def build_leaps_snapshot(
         intrinsic_value_pct=intrinsic_value_pct,
         theoretical_current_value=theoretical_current_value,
         theoretical_pnl=theoretical_pnl,
-        accumulated_theta=accumulated_theta,
+        theta_30d_run_rate=theta_30d_run_rate,
         profit_pct=profit_pct,
         effective_shares=effective_shares,
         effective_exposure=effective_exposure,
         effective_position_pct=effective_position_pct,
         leverage_ratio=leverage_ratio,
+        realized_pnl=position.realized_pnl if not is_active else None,
     )
 
 
@@ -1617,6 +1658,8 @@ class LeapsScenario:
     breakeven: float
     days_to_expiry: Optional[int]
     base_price: float
+    current_option_value: Optional[float]
+    current_value_source: str
     rows: list[LeapsScenarioRow]
     pct_move_to_breakeven: Optional[float]
     move_direction: str  # "rise" or "fall"
@@ -1628,7 +1671,11 @@ class LeapsScenario:
     warnings: list[str] = field(default_factory=list)
 
 
-def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float] = None) -> LeapsScenario:
+def build_leaps_scenario(
+    position: LeapsPosition,
+    current_price: Optional[float] = None,
+    current_option_mark: Optional[float] = None,
+) -> LeapsScenario:
     is_call = position.option_type == "CALL"
     strike, premium, contracts = position.strike, position.premium, position.contracts
     total_cost = premium * 100 * contracts
@@ -1681,22 +1728,26 @@ def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float]
 
     early_exit_target_value = premium * position.profit_target_multiplier
     early_exit_target_price = None
-    effective_delta = position.current_delta if position.current_delta is not None else position.entry_delta
-    if effective_delta:
-        delta_move = (early_exit_target_value - premium) / effective_delta
-        early_exit_target_price = (
-            position.entry_stock_price + delta_move if is_call else position.entry_stock_price - delta_move
-        )
+    entry_delta = _signed_leaps_delta(position.option_type, position.entry_delta)
+    current_delta = _signed_leaps_delta(position.option_type, position.current_delta)
+    effective_delta = current_delta if current_delta is not None else entry_delta
+    current_option_value = current_option_mark
+    if current_option_value is None and current_price is not None and entry_delta is not None:
+        rough_value = premium + (current_price - position.entry_stock_price) * entry_delta
+        intrinsic_now = max(0.0, current_price - strike) if is_call else max(0.0, strike - current_price)
+        current_option_value = max(0.0, intrinsic_now, rough_value)
+        current_value_source = "entry-delta estimate"
+    else:
+        current_value_source = "Yahoo bid/ask midpoint" if current_option_mark is not None else "unavailable"
+    if effective_delta and base_price is not None and current_option_value is not None:
+        early_exit_target_price = base_price + (early_exit_target_value - current_option_value) / effective_delta
 
     loss_exit_levels: list[LeapsLossExitLevel] = []
     for loss_pct, severity in LOSS_EXIT_THRESHOLDS:
         target_value = premium * (1 - loss_pct / 100)
         target_price = None
-        if effective_delta:
-            delta_move = (target_value - premium) / effective_delta
-            target_price = (
-                position.entry_stock_price + delta_move if is_call else position.entry_stock_price - delta_move
-            )
+        if effective_delta and base_price is not None and current_option_value is not None:
+            target_price = base_price + (target_value - current_option_value) / effective_delta
         loss_exit_levels.append(
             LeapsLossExitLevel(
                 loss_pct=loss_pct, target_value=target_value, target_price=target_price, severity=severity
@@ -1710,7 +1761,7 @@ def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float]
             "this tool doesn't track IV history."
         )
     warnings.append(
-        "Confirm the next earnings date before entering or exiting — IV often drops sharply after earnings reports."
+        "Confirm the next earnings date before entering or exiting — earnings can cause a gap and a change in implied volatility; direction and size are uncertain."
     )
     if time_stop_date:
         warnings.append(
@@ -1728,6 +1779,8 @@ def build_leaps_scenario(position: LeapsPosition, current_price: Optional[float]
         breakeven=breakeven,
         days_to_expiry=days_to_expiry,
         base_price=base_price,
+        current_option_value=current_option_value,
+        current_value_source=current_value_source,
         rows=rows,
         pct_move_to_breakeven=pct_move_to_breakeven,
         move_direction=move_direction,

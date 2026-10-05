@@ -152,8 +152,26 @@ stocktool etf valuation VOO QQQM [--html]
 stocktool strategy dip [--sma-days 200]
 stocktool strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
 stocktool strategy margin [AMOUNT] [--reset]
+stocktool leaps add
+stocktool leaps list [--all | --closed]
+stocktool leaps show ID|TICKER
+stocktool leaps update ID|TICKER
+stocktool leaps remove ID|TICKER
 stocktool docs
 ```
+
+## LEAPS Tracking
+
+LEAPS positions are stored in `~/.config/stocktool/leaps.json` (local JSON only). `leaps add` validates approved tickers, expiry, signed delta, and position sizing. Put deltas use the conventional negative sign; delta range and exposure calculations use its magnitude where appropriate.
+
+- Active position P&L uses a valid Yahoo two-sided bid/ask midpoint when available. The midpoint is indicative, not a guaranteed fill. When no valid quote is available, show an explicitly labeled rough estimate based on the **entry** delta and the stock move since entry; do not extrapolate that full move using today's delta.
+- Show quote retrieval time and last contract trade time where available. A last trade is context only and must not be substituted for a current option mark.
+- Keep theta as a current 30-day run-rate estimate (`abs(position_theta) × 30`), not cumulative historical decay. Label its assumptions.
+- Early-exit stock-price scenarios start from the current stock price and current option value, using signed current delta (or entry delta as a clearly labeled fallback). Mark them as local linear approximations that omit gamma, IV changes, and theta.
+- IV compared with realized volatility is context about different measures and periods, not a verdict that the option is cheap or expensive. Earnings proximity is a risk reminder, not a prediction of an IV crush.
+- Do not display a closed position's old live/theoretical P&L as realized performance. Only calculate realized P&L when a close price is recorded; otherwise show it as unavailable.
+- Never use a partial portfolio market value to claim a safe sizing percentage. If any tracked holding lacks a current price, treat the total as unavailable and ask for a manual total in the interactive add flow.
+- When adding a LEAPS feature, update this section and `CLAUDE.md`; keep JSON persistence local, live data best-effort, and all quote/model provenance visible in terminal output.
 
 ## ETF Support
 

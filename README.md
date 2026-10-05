@@ -74,6 +74,18 @@ stocktool portfolio show
 |---------|-------------|
 | `stocktool strategy dip [--sma-days 200]` | Market dip alert: VIX fear gauge + margin deployment rules + SMA dip candidates |
 
+### LEAPS Tracking
+
+| Command | Description |
+|---------|-------------|
+| `stocktool leaps add` | Guided LEAPS entry with sizing and contract checks |
+| `stocktool leaps list [--all] [--closed]` | Review active or closed LEAPS positions |
+| `stocktool leaps show ID\|TICKER` | Review position Greeks, quote provenance, P&L, and scenarios |
+| `stocktool leaps update ID\|TICKER` | Refresh manually supplied Greeks and Yahoo quote/IV |
+| `stocktool leaps remove ID\|TICKER` | Close a position and optionally record its close price |
+
+LEAPS data is stored locally in `~/.config/stocktool/leaps.json`. Active P&L uses a valid Yahoo bid/ask midpoint where available, otherwise a clearly labeled entry-delta estimate. A midpoint is indicative, not a guaranteed fill; closed P&L is realized only when a close price is recorded.
+
 ## Features
 
 ### Valuation Template
