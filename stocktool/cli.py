@@ -24,6 +24,7 @@ strategy_app = typer.Typer(help="Investment strategy commands.", no_args_is_help
 app.add_typer(strategy_app, name="strategy")
 
 leaps_app = typer.Typer(help="LEAPS options tracking commands.", no_args_is_help=True)
+# Small no-op change to exercise Codex's pull request tab.
 app.add_typer(leaps_app, name="leaps")
 
 console = Console()
