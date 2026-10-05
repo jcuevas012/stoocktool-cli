@@ -632,6 +632,17 @@ Price points are generated from a fixed set of multipliers on the current (or en
 
 **Loss-exit scenario (downside alert):** the mirror image of the early-exit estimate — same linear delta approximation, same `Effective Delta` fallback, same theta-ignoring caveat — but solving for the stock price at which the position has lost a fixed fraction of premium rather than gained a multiple of it: `target_value = premium × (1 - loss_pct / 100)`, solved via the identical `premium + (price - entry_stock_price) × Effective Delta = target_value` equation. Two fixed thresholds (`analysis.LOSS_EXIT_THRESHOLDS`), not configurable: **-30% loss** (yellow, "reassess position") and **-50% loss** (red, "immediate exit"). New `LeapsLossExitLevel` dataclass (`loss_pct`, `target_value`, `target_price`, `severity`) and `LeapsScenario.loss_exit_levels` field, computed in `build_leaps_scenario()` and rendered as a "Loss Exit Scenario (Downside Alert)" panel in `display.render_leaps_scenario()`, right after the Early Exit panel — appears automatically in both `leaps add`'s confirmation step and `leaps show` since both already call this function. `target_price` is `None` (with an explanatory line) under the same no-delta-recorded condition as the early-exit price.
 
+**Theta Decay Acceleration Date:** answers "on what date does time decay start meaningfully working against this position?" — separate from the fixed `LEAPS_DEFAULT_TIME_STOP_DAYS` (90-day) exit rule, which uses the same flat day count for every contract regardless of how long the LEAPS runs. Grounded in the standard options-pricing heuristic that time value decays roughly proportional to `sqrt(days remaining)`, so daily theta roughly doubles once remaining life drops to 1/4 of its value — "last third of life" is the commonly-cited point where decay becomes materially faster.
+
+```
+Total Life            = expiration − entry_date
+Decay Acceleration    = expiration − (Total Life × LEAPS_DECAY_ACCELERATION_FRACTION)   [default 1/3]
+```
+
+`analysis.compute_leaps_decay_date(entry_date, expiration)` is the single source of this formula — returns `(decay_acceleration_date, days_to_decay_acceleration)`, called from `build_leaps_snapshot()` (populates `LeapsSnapshot.decay_acceleration_date` / `days_to_decay_acceleration`) and directly from `leaps add`'s confirmation step (no snapshot exists yet at that point in the wizard). Falls back to treating today as the start of life if `entry_date` is missing, mirroring `days_held`'s own fallback.
+
+**Color/surfacing:** `analysis.leaps_decay_color()` is binary — red once `days_to_decay_acceleration <= 0`, else green — same pattern as `leaps_dte_color()`. Rendered in three places: a line in `render_leaps_detail()`'s Computed section ("N days of slow decay left" / "passed N days ago — theta now eroding faster each week"), a summary flag in `render_leaps_list()` ("In accelerated decay zone: TICKER") alongside the existing time-stop/delta-drift/leverage flags, and a line in `leaps add`'s confirmation Summary printed right after the exit-rule line.
+
 ## Rebalancing Logic
 
 - OVERWEIGHT: current_weight > target_weight + 2%  → red

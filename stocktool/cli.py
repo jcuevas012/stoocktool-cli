@@ -1136,6 +1136,14 @@ def leaps_add() -> None:
     console.print(f"  Premium ${premium:.2f} x {contracts} contract(s) = ${total_cost:,.2f}")
     console.print(f"  Breakeven: ${breakeven:.2f}  ·  Position size: {position_pct:.2f}%")
     console.print(f"  Exit: {profit_target_multiplier}x profit target, {days_before_expiry_exit}-day time stop")
+    decay_date, decay_days = analysis.compute_leaps_decay_date(position.entry_date, position.expiration)
+    if decay_date is not None:
+        decay_desc = (
+            f"{decay_days} days of slow decay before theta accelerates"
+            if decay_days is not None and decay_days > 0
+            else "already past the 1/3-life mark — decay is accelerating now"
+        )
+        console.print(f"  Decay acceleration date: {decay_date} ({decay_desc})")
     console.print()
 
     scenario = analysis.build_leaps_scenario(position, current_price)

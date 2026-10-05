@@ -12,7 +12,7 @@ from .analysis import (
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
     LeapsSnapshot, LeapsScenario, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
-    leaps_leverage_color, leaps_exposure_color,
+    leaps_leverage_color, leaps_exposure_color, leaps_decay_color,
 )
 from .leaps import LeapsPosition
 from .portfolio import PortfolioSnapshot
@@ -2171,6 +2171,10 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     if high_leverage:
         tickers_str = ", ".join(s.ticker for s in high_leverage)
         lines.append(f"[bold red]Leverage above 7x (losing stock-like character):[/bold red] {tickers_str}")
+    decaying = [s for s in active if leaps_decay_color(s.days_to_decay_acceleration) == "red"]
+    if decaying:
+        tickers_str = ", ".join(s.ticker for s in decaying)
+        lines.append(f"[bold red]In accelerated decay zone:[/bold red] {tickers_str} — theta now eroding value faster each week")
     lines.append("[dim]Theoretical P&L is a delta-based estimate from entry Greeks, not a live option quote.[/dim]")
 
     console.print(Panel(
@@ -2200,6 +2204,20 @@ def _leaps_iv_history_lines(position: LeapsPosition) -> list[str]:
         arrow = "↑" if change > 0 else ("↓" if change < 0 else "→")
         lines.append(f"  Trend: {arrow} {change:+.1f}pp since previous reading")
     return lines
+
+
+def _decay_acceleration_line(snapshot: LeapsSnapshot) -> str:
+    """Plain-English status line for the decay acceleration date — slow-decay zone vs. already accelerating."""
+    if snapshot.decay_acceleration_date is None or snapshot.days_to_decay_acceleration is None:
+        return "  Decay acceleration date: N/A (needs entry date + expiration)"
+    color = leaps_decay_color(snapshot.days_to_decay_acceleration)
+    days = snapshot.days_to_decay_acceleration
+    status = (
+        f"{days} days of slow decay left"
+        if days > 0
+        else f"passed {abs(days)} days ago — theta now eroding faster each week"
+    )
+    return f"  Decay acceleration date: [{color}]{snapshot.decay_acceleration_date}[/{color}] ({status})"
 
 
 def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> None:
@@ -2242,6 +2260,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
         f"  Breakeven: ${snapshot.breakeven:.2f}" if snapshot.breakeven is not None else "  Breakeven: N/A",
         f"  Days to expiry: [{dte_color}]{snapshot.days_to_expiry}[/{dte_color}]" if snapshot.days_to_expiry is not None else "  Days to expiry: N/A",
         f"  Days held: {snapshot.days_held}" if snapshot.days_held is not None else "  Days held: N/A",
+        _decay_acceleration_line(snapshot),
         f"  Current stock price: ${snapshot.current_stock_price:.2f}" if snapshot.current_stock_price is not None else "  Current stock price: N/A",
         (
             f"  Intrinsic value: ${snapshot.intrinsic_value:.2f} ({snapshot.intrinsic_value_pct:.1f}% of stock price)"

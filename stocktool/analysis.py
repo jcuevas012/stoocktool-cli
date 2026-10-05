@@ -1360,6 +1360,8 @@ class LeapsSnapshot:
     breakeven: Optional[float] = None
     days_to_expiry: Optional[int] = None
     days_held: Optional[int] = None
+    decay_acceleration_date: Optional[str] = None
+    days_to_decay_acceleration: Optional[int] = None
     position_pct: Optional[float] = None
     intrinsic_value: Optional[float] = None
     intrinsic_value_pct: Optional[float] = None
@@ -1380,6 +1382,36 @@ def leaps_dte_color(days_to_expiry: Optional[int]) -> str:
         return "dim"
     from .config import LEAPS_DEFAULT_TIME_STOP_DAYS
     return "red" if days_to_expiry < LEAPS_DEFAULT_TIME_STOP_DAYS else "green"
+
+
+def compute_leaps_decay_date(
+    entry_date_iso: Optional[str], expiration_iso: str
+) -> tuple[Optional[str], Optional[int]]:
+    """Date at which theta decay is expected to start accelerating for this specific contract.
+
+    Scales LEAPS_DECAY_ACCELERATION_FRACTION (default last third of life) to the position's own
+    entry-to-expiration span, rather than using a flat day count for every contract length — see
+    the constant's docstring in config.py for the sqrt(time)-decay rationale. Falls back to
+    treating today as the start of life if entry_date is missing (mirrors build_leaps_snapshot's
+    own days_held fallback).
+    """
+    from .config import LEAPS_DECAY_ACCELERATION_FRACTION
+
+    expiration_date = date.fromisoformat(expiration_iso)
+    entry_date = date.fromisoformat(entry_date_iso) if entry_date_iso else date.today()
+    total_days = (expiration_date - entry_date).days
+    if total_days <= 0:
+        return None, None
+    decay_date = expiration_date - timedelta(days=round(total_days * LEAPS_DECAY_ACCELERATION_FRACTION))
+    days_to_decay_date = (decay_date - date.today()).days
+    return decay_date.isoformat(), days_to_decay_date
+
+
+def leaps_decay_color(days_to_decay_acceleration: Optional[int]) -> str:
+    """Red once past the decay acceleration date, else green — same binary pattern as leaps_dte_color."""
+    if days_to_decay_acceleration is None:
+        return "dim"
+    return "red" if days_to_decay_acceleration <= 0 else "green"
 
 
 def leaps_profit_color(profit_pct: Optional[float], profit_target_multiplier: float = 1.5) -> str:
@@ -1456,6 +1488,10 @@ def build_leaps_snapshot(
     entry_date = date.fromisoformat(position.entry_date) if position.entry_date else date.today()
     days_held = (date.today() - entry_date).days
 
+    decay_acceleration_date, days_to_decay_acceleration = compute_leaps_decay_date(
+        position.entry_date, position.expiration
+    )
+
     position_pct = None
     if portfolio_value:
         position_pct = (position.contracts * premium * 100) / portfolio_value * 100
@@ -1525,6 +1561,8 @@ def build_leaps_snapshot(
         breakeven=breakeven,
         days_to_expiry=days_to_expiry,
         days_held=days_held,
+        decay_acceleration_date=decay_acceleration_date,
+        days_to_decay_acceleration=days_to_decay_acceleration,
         position_pct=position_pct,
         intrinsic_value=intrinsic_value,
         intrinsic_value_pct=intrinsic_value_pct,

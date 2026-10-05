@@ -45,6 +45,13 @@ LEAPS_DEFAULT_PROFIT_TARGET = 1.5
 LEAPS_DEFAULT_TIME_STOP_DAYS = 90
 # Warn in the `leaps add` wizard if the next earnings date falls within this many days of today
 LEAPS_EARNINGS_WARN_DAYS = int(os.environ.get("LEAPS_EARNINGS_WARN_DAYS", "21"))
+# Fraction of a position's total life (entry date -> expiration) remaining at which theta decay
+# is considered to start accelerating. Grounded in the standard options-pricing heuristic that
+# time value decays roughly proportional to sqrt(days remaining) — theta roughly doubles once
+# remaining life drops to 1/4 of its value, and "last third of life" is the commonly-cited point
+# where daily decay becomes materially faster. Scales to each position's own duration instead of
+# reusing the flat LEAPS_DEFAULT_TIME_STOP_DAYS day count for every contract length.
+LEAPS_DECAY_ACCELERATION_FRACTION = 1 / 3
 
 # Google Sheets settings
 CREDENTIALS_FILE = Path(
