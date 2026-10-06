@@ -1,7 +1,7 @@
 import unittest
 from datetime import date, timedelta
 
-from stocktool.analysis import build_leaps_scenario, leaps_iv_rank
+from stocktool.analysis import build_leaps_scenario, build_leaps_snapshot, leaps_iv_rank
 from stocktool.leaps import IvReading, LeapsPosition
 
 
@@ -47,6 +47,30 @@ class LeapsIvRankTests(unittest.TestCase):
 
     def test_none_current_iv_returns_none(self):
         self.assertIsNone(leaps_iv_rank(None, readings(20, 25, 30, 35, 40)))
+
+
+class SnapshotIvRankFreshnessTests(unittest.TestCase):
+    """Review finding (Critical): the rank must reflect this run's fresh market IV, not a
+    stale current_iv/entry_iv left over from before leaps show started auto-capturing."""
+
+    def test_rank_uses_fresh_market_iv_not_stale_entry_iv(self):
+        position = LeapsPosition(
+            id="rank001", ticker="TEST", option_type="CALL", strike=100.0,
+            expiration=(date.today() + timedelta(days=365)).isoformat(), premium=10.0,
+            entry_stock_price=100.0, entry_iv=30.0,
+        )
+        for i, iv in enumerate([40.0, 41.0, 42.0, 43.0, 44.0, 47.0]):
+            position.iv_history.append(
+                IvReading(date=(date.today() - timedelta(days=6 - i)).isoformat(), iv=iv, source="yahoo")
+            )
+        # current_iv is None (leaps update never ran) — only leaps show's auto-capture, which
+        # lands in option_quote this run, not in position.current_iv.
+        option_quote = {"implied_volatility": 47.0, "mid": 10.0}
+
+        snapshot = build_leaps_snapshot(position, 100.0, 10000.0, option_quote, realized_vol=40.0)
+
+        self.assertAlmostEqual(snapshot.iv_rank_pct, 100.0)
+        self.assertEqual(snapshot.iv_rank_label, "EXPENSIVE")
 
 
 class ScenarioIvWarningTests(unittest.TestCase):

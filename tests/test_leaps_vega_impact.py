@@ -67,6 +67,23 @@ class VegaImpactTests(unittest.TestCase):
         self.assertEqual(impact.current_iv, 30.0)
         self.assertEqual(impact.iv_change_pts, 0.0)
 
+    def test_flags_current_iv_as_fallback_when_no_current_reading(self):
+        # Review finding (Important #4): the panel must be able to tell a real current IV
+        # reading apart from an entry-IV fallback, since the main detail panel shows
+        # "Current IV: N/A" in exactly this situation.
+        position = make_position(entry_iv=30.0, current_iv=None)
+        curve = make_curve(position)
+        impact = build_leaps_vega_impact(curve, position)
+
+        self.assertTrue(impact.current_iv_is_fallback)
+
+    def test_does_not_flag_fallback_when_current_iv_is_actually_set(self):
+        position = make_position(entry_iv=30.0, current_iv=32.0)
+        curve = make_curve(position)
+        impact = build_leaps_vega_impact(curve, position)
+
+        self.assertFalse(impact.current_iv_is_fallback)
+
 
 if __name__ == "__main__":
     unittest.main()

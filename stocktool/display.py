@@ -2199,12 +2199,26 @@ def _leaps_current_iv_line(position: LeapsPosition, snapshot: LeapsSnapshot) -> 
 
 
 def _leaps_iv_rank_line(snapshot: LeapsSnapshot) -> str:
-    """IV Rank against this position's own tracked history (not a true 52-week range)."""
+    """IV Rank against this position's own tracked history (not a true 52-week range).
+
+    The None-label case has several distinct causes that shouldn't collapse into one
+    message: a closed position (rank is never computed for these), no readings tracked at
+    all, fewer than the configured minimum, or enough readings but no current IV value to
+    rank against them.
+    """
     if snapshot.iv_rank_label is None:
-        return (
-            f"  IV Rank: not enough history yet ({snapshot.iv_rank_reading_count} reading(s) so far) "
-            "— keep running `leaps show`/`leaps update` to build this up"
-        )
+        if snapshot.status != "ACTIVE":
+            return "  IV Rank: not computed for closed positions"
+        if snapshot.iv_rank_reading_count == 0:
+            return "  IV Rank: no IV readings tracked yet — run `leaps show`/`leaps update` to start"
+        from .config import LEAPS_IV_RANK_MIN_READINGS
+        if snapshot.iv_rank_reading_count < LEAPS_IV_RANK_MIN_READINGS:
+            return (
+                f"  IV Rank: not enough history yet ({snapshot.iv_rank_reading_count}/"
+                f"{LEAPS_IV_RANK_MIN_READINGS} readings) — keep running `leaps show`/`leaps update` "
+                "to build this up"
+            )
+        return "  IV Rank: unavailable — no current IV reading to rank"
     return (
         f"  IV Rank: [{snapshot.iv_rank_color}]{snapshot.iv_rank_pct:.0f}th percentile — "
         f"{snapshot.iv_rank_label}[/{snapshot.iv_rank_color}] "
@@ -2472,7 +2486,8 @@ def render_leaps_vega_section(
     if impact.entry_iv is not None:
         lines.append(f"Entry IV: {impact.entry_iv:.1f}%")
     if impact.current_iv is not None:
-        lines.append(f"Current IV: {impact.current_iv:.1f}%")
+        fallback_note = " [dim](entry IV — no current reading)[/dim]" if impact.current_iv_is_fallback else ""
+        lines.append(f"Current IV: {impact.current_iv:.1f}%{fallback_note}")
     if impact.iv_change_pts is not None:
         arrow = "↑" if impact.iv_change_pts > 0 else ("↓" if impact.iv_change_pts < 0 else "→")
         pnl_color = "green" if impact.vega_pnl_since_entry >= 0 else "red"

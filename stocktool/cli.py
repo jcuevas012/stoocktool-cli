@@ -1467,7 +1467,7 @@ def leaps_update(
     position.last_updated = date.today().isoformat()
     if current_iv is not None:
         source = "yahoo" if market_iv is not None and abs(current_iv - market_iv) < 0.05 else "manual"
-        position.record_iv_reading(current_iv, date.today(), source)
+        position.record_iv_reading(current_iv, date.today(), source, overwrite=True)
     save_leaps(book)
     console.print(f"[green]Updated {position.ticker} (id={position.id}) as of {position.last_updated}.[/green]\n")
 

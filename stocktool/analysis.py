@@ -1481,6 +1481,7 @@ class LeapsVegaImpact:
     impact_minus_20: float
     entry_iv: Optional[float]
     current_iv: Optional[float]
+    current_iv_is_fallback: bool  # True when current_iv is really entry_iv, no current reading
     iv_change_pts: Optional[float]
     vega_pnl_since_entry: Optional[float]
 
@@ -1498,6 +1499,7 @@ def build_leaps_vega_impact(
         return None
     vega_total = curve.vega * position.contracts
     entry_iv = position.entry_iv
+    current_iv_is_fallback = position.current_iv is None and entry_iv is not None
     current_iv = position.current_iv if position.current_iv is not None else entry_iv
     iv_change_pts = None
     vega_pnl_since_entry = None
@@ -1511,6 +1513,7 @@ def build_leaps_vega_impact(
         impact_minus_10=vega_total * -10,
         impact_minus_20=vega_total * -20,
         entry_iv=entry_iv,
+        current_iv_is_fallback=current_iv_is_fallback,
         current_iv=current_iv,
         iv_change_pts=iv_change_pts,
         vega_pnl_since_entry=vega_pnl_since_entry,
@@ -1912,7 +1915,16 @@ def build_leaps_snapshot(
     iv_value_label, iv_value_color, iv_value_ratio = None, "dim", None
     iv_rank = None
     if is_active:
-        latest_iv = position.current_iv if position.current_iv is not None else position.entry_iv
+        # Prefer this run's live market IV (e.g. from leaps_show's auto-capture, which lands
+        # in option_quote but not in position.current_iv until a `leaps update` is run) over
+        # the possibly-stale current_iv/entry_iv fields — otherwise the rank can compare an
+        # old reading against a history that has since moved past it.
+        market_iv = option_quote.get("implied_volatility")
+        latest_iv = (
+            market_iv if market_iv is not None
+            else position.current_iv if position.current_iv is not None
+            else position.entry_iv
+        )
         iv_value_label, iv_value_color, iv_value_ratio = leaps_iv_value_verdict(latest_iv, realized_vol)
         iv_rank = leaps_iv_rank(latest_iv, position.iv_history)
 

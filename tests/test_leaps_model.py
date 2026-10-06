@@ -40,6 +40,30 @@ class RecordIvReadingTests(unittest.TestCase):
         self.assertEqual(len(position.iv_history), 2)
         self.assertEqual(position.iv_history[1].source, "manual")
 
+    def test_same_day_passive_capture_does_not_overwrite(self):
+        # Default (overwrite=False) is for leaps_show's passive auto-capture — a second
+        # passive capture the same day must not clobber the first reading.
+        position = make_position()
+        position.record_iv_reading(30.0, date(2026, 1, 1), "yahoo")
+        appended = position.record_iv_reading(99.0, date(2026, 1, 1), "yahoo")
+
+        self.assertFalse(appended)
+        self.assertEqual(len(position.iv_history), 1)
+        self.assertEqual(position.iv_history[0].iv, 30.0)
+
+    def test_same_day_explicit_update_overwrites_earlier_passive_capture(self):
+        # Review finding (Important #3): an explicit `leaps update` reading is the
+        # authoritative one for the day and must not be silently dropped behind an earlier
+        # same-day passive auto-capture from `leaps show`.
+        position = make_position()
+        position.record_iv_reading(30.0, date(2026, 1, 1), "yahoo")  # leaps show, earlier today
+        appended = position.record_iv_reading(35.0, date(2026, 1, 1), "manual", overwrite=True)
+
+        self.assertTrue(appended)
+        self.assertEqual(len(position.iv_history), 1)
+        self.assertEqual(position.iv_history[0].iv, 35.0)
+        self.assertEqual(position.iv_history[0].source, "manual")
+
 
 class ShouldCaptureIvReadingTests(unittest.TestCase):
     """Review Focus #3: the leaps_show capture guard must not fire for CLOSED positions or
