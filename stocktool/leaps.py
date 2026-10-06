@@ -51,6 +51,18 @@ class LeapsPosition:
     close_price: Optional[float] = None
     realized_pnl: Optional[float] = None
 
+    def record_iv_reading(self, iv: float, today: date, source: str) -> bool:
+        """Append one IV reading for `today`, deduped by calendar day — returns False (no-op)
+        if today's reading is already recorded, so repeated `leaps show` runs in one day don't
+        flood the history. `today` is a parameter (not `date.today()` internally) so this is
+        testable without faking the clock.
+        """
+        today_iso = today.isoformat()
+        if self.iv_history and self.iv_history[-1].date == today_iso:
+            return False
+        self.iv_history.append(IvReading(date=today_iso, iv=iv, source=source))
+        return True
+
 
 @dataclass
 class LeapsBook:

@@ -945,6 +945,12 @@ def _resolve_leaps_position(book, identifier: str):
     return matches[choice - 1]
 
 
+def _should_capture_iv_reading(position_status: str, market_iv: Optional[float]) -> bool:
+    """Guard for leaps_show's new auto-capture: only for ACTIVE positions, and only when a
+    market IV reading actually came back this run."""
+    return position_status == "ACTIVE" and market_iv is not None
+
+
 def _get_leaps_option_quote(position):
     """Fetch a current two-sided quote for one active position, if Yahoo has it."""
     if position.status != "ACTIVE":
@@ -1304,8 +1310,10 @@ def leaps_show(
     identifier: str = typer.Argument(..., help="LEAPS position id or ticker symbol."),
 ) -> None:
     """Detail view for a single LEAPS position."""
+    from datetime import date
+
     from . import data, analysis, display
-    from .leaps import load_leaps
+    from .leaps import load_leaps, save_leaps
 
     book = load_leaps()
     position = _resolve_leaps_position(book, identifier)
@@ -1317,13 +1325,18 @@ def leaps_show(
     portfolio_value = _leaps_portfolio_value()
     option_quote = _get_leaps_option_quote(position)
     realized_vol = data.fetch_realized_volatility(position.ticker) if position.status == "ACTIVE" else None
+
+    market_iv = option_quote.get("implied_volatility")
+    if _should_capture_iv_reading(position.status, market_iv):
+        if position.record_iv_reading(market_iv, date.today(), "yahoo"):
+            save_leaps(book)
+
     snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote, realized_vol)
     display.render_leaps_detail(position, snapshot)
 
     if position.status == "CLOSED":
         return
 
-    market_iv = option_quote.get("implied_volatility")
     if market_iv is not None:
         gamma_iv = market_iv
         gamma_iv_source = f"Yahoo option chain IV (retrieved {option_quote.get('retrieved_at', 'time unavailable')})"
@@ -1364,7 +1377,7 @@ def leaps_update(
     from datetime import date
 
     from . import data, analysis, display
-    from .leaps import load_leaps, save_leaps, IvReading
+    from .leaps import load_leaps, save_leaps
 
     book = load_leaps()
     position = _resolve_leaps_position(book, identifier)
@@ -1444,7 +1457,7 @@ def leaps_update(
     position.last_updated = date.today().isoformat()
     if current_iv is not None:
         source = "yahoo" if market_iv is not None and abs(current_iv - market_iv) < 0.05 else "manual"
-        position.iv_history.append(IvReading(date=position.last_updated, iv=current_iv, source=source))
+        position.record_iv_reading(current_iv, date.today(), source)
     save_leaps(book)
     console.print(f"[green]Updated {position.ticker} (id={position.id}) as of {position.last_updated}.[/green]\n")
 

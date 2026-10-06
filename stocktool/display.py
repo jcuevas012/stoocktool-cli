@@ -2197,6 +2197,21 @@ def _leaps_current_iv_line(position: LeapsPosition, snapshot: LeapsSnapshot) -> 
     return line
 
 
+def _leaps_iv_rank_line(snapshot: LeapsSnapshot) -> str:
+    """IV Rank against this position's own tracked history (not a true 52-week range)."""
+    if snapshot.iv_rank_label is None:
+        return (
+            f"  IV Rank: not enough history yet ({snapshot.iv_rank_reading_count} reading(s) so far) "
+            "— keep running `leaps show`/`leaps update` to build this up"
+        )
+    return (
+        f"  IV Rank: [{snapshot.iv_rank_color}]{snapshot.iv_rank_pct:.0f}th percentile — "
+        f"{snapshot.iv_rank_label}[/{snapshot.iv_rank_color}] "
+        f"(range {snapshot.iv_range_low:.1f}%-{snapshot.iv_range_high:.1f}% over "
+        f"{snapshot.iv_rank_reading_count} tracked readings)"
+    )
+
+
 def _leaps_iv_history_lines(position: LeapsPosition, snapshot: LeapsSnapshot) -> list[str]:
     """Lines for the IV History block: one reading per `leaps add`/`leaps update` run so far.
 
@@ -2224,6 +2239,16 @@ def _leaps_iv_history_lines(position: LeapsPosition, snapshot: LeapsSnapshot) ->
         lines.append(line)
     if len(position.iv_history) > 8:
         lines.append(f"  [dim]...and {len(position.iv_history) - 8} earlier reading(s) not shown.[/dim]")
+    entry_day_reading = next((r for r in position.iv_history if r.date == position.entry_date), None)
+    if (
+        entry_day_reading is not None
+        and position.entry_iv is not None
+        and abs(position.entry_iv - entry_day_reading.iv) > 5
+    ):
+        lines.append(
+            f"  [yellow]⚠ Entry-day IV mismatch: manually entered {position.entry_iv:.1f}% vs. "
+            f"Yahoo chain {entry_day_reading.iv:.1f}% that day.[/yellow]"
+        )
     if len(position.iv_history) >= 2:
         change = position.iv_history[-1].iv - position.iv_history[-2].iv
         arrow = "↑" if change > 0 else ("↓" if change < 0 else "→")
@@ -2277,6 +2302,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
         ),
         f"  Current theta: -${abs(position.current_theta):.2f}/day" if position.current_theta is not None else "  Current theta: N/A",
         _leaps_current_iv_line(position, snapshot),
+        _leaps_iv_rank_line(snapshot),
         f"  Last updated: {position.last_updated}" if position.last_updated else "  Last updated: never — entry values are the only reading on file",
         "",
         "[bold cyan]IV History[/bold cyan]",
