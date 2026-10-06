@@ -74,16 +74,16 @@ rank_pct = clamp((current_iv - low) / (high - low) * 100, 0, 100)   # 50 if high
 ```
 
 Returns `None` (displayed as "not enough history yet — N/5 readings") when fewer than
-`LEAPS_IV_RANK_MIN_READINGS` (5) readings exist. New config constants — four text labels for
-precision, but only the project's existing green/yellow/red palette (every other LEAPS color
-function — delta, leverage, exposure, profit — stays within these three; NORMAL and ELEVATED
-share yellow, distinguished by label text, not a new color):
+`LEAPS_IV_RANK_MIN_READINGS` (5) readings exist. New config constants — a 4-tier ladder with
+its own 4th color (`orange3`, between yellow and red), a deliberate first exception to this
+tool's existing green/yellow/red-only LEAPS palette (delta, leverage, exposure, profit all stay
+3-color) because this ladder specifically needs to distinguish "watch it" from "avoid it":
 
 | Rank | Label | Color |
 |---|---|---|
 | 0–30 | CHEAP | green |
 | 30–60 | NORMAL | yellow |
-| 60–80 | ELEVATED | yellow |
+| 60–80 | ELEVATED | orange3 |
 | 80–100 | EXPENSIVE | red |
 
 (`LEAPS_IV_RANK_CHEAP_MAX=30`, `LEAPS_IV_RANK_NORMAL_MAX=60`, `LEAPS_IV_RANK_ELEVATED_MAX=80`.)
@@ -137,13 +137,13 @@ pull `volume` and `openInterest` from the same `option_chain()` row already bein
 IV are already pulled from this row today — this is almost free).
 
 **Rating** (new `analysis.leaps_liquidity_rating(spread_pct, open_interest) -> (label, color)`),
-same three-color palette as everywhere else (MODERATE and WIDE both yellow):
+same 4-tier palette as IV Rank above:
 
 | Spread (of mid) | OI | Rating | Color |
 |---|---|---|---|
 | < 1% | > 500 | TIGHT | green |
 | 1–3% | > 100 | MODERATE | yellow |
-| 3–5% | > 50 | WIDE | yellow |
+| 3–5% | > 50 | WIDE | orange3 |
 | > 5% or missing OI/spread | ≤ 50 | ILLIQUID / N/A | red / dim |
 
 **Display:** new `display.render_leaps_liquidity(option_quote, rating_label, rating_color,
