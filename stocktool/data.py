@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import yfinance as yf
 
-from .config import MARGIN_STATE_FILE, ensure_config_dir
+from .config import MARGIN_STATE_FILE, LEAPS_EARNINGS_HISTORY_QUARTERS, ensure_config_dir
 
 
 def get_used_margin() -> float:
@@ -826,6 +826,111 @@ def fetch_leaps_gamma_inputs(ticker: str) -> dict:
     return result
 
 
+def fetch_realized_volatility(ticker: str, period: str = "1y") -> Optional[float]:
+    """Best-effort annualized realized (historical) volatility (%) from daily log returns.
+
+    Used as a free-data proxy for "average IV" — yfinance has no historical-implied-volatility
+    series, so actual realized price movement stands in for it when judging whether a LEAPS
+    contract's current market IV looks cheap or expensive. Returns None on any failure.
+    """
+    try:
+        import numpy as np
+
+        hist = yf.Ticker(ticker).history(period=period)
+        if hist.empty or len(hist) <= 5:
+            return None
+        log_returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+        return float(log_returns.std() * (252 ** 0.5)) * 100  # fraction -> percent
+    except Exception:
+        return None
+
+
+def fetch_next_earnings_date(ticker: str) -> dict:
+    """Best-effort next earnings date lookup — standalone so `leaps show`/`leaps update` can
+    use it too, not just `leaps add`'s fetch_leaps_option_context`. Never raises.
+
+    Returns a dict with "earnings_date" (ISO) and "days_to_earnings" (int) when found, {}
+    otherwise.
+    """
+    from datetime import date, datetime
+
+    result: dict = {}
+    try:
+        t = yf.Ticker(ticker)
+        earnings_date = None
+        cal = t.calendar
+        if isinstance(cal, dict) and cal.get("Earnings Date"):
+            earnings_date = cal["Earnings Date"][0]
+        if earnings_date is None:
+            edf = t.get_earnings_dates(limit=4)
+            if edf is not None and not edf.empty:
+                future = edf[edf.index.date >= date.today()]
+                if not future.empty:
+                    earnings_date = future.index[-1].date()
+        if earnings_date is not None:
+            if isinstance(earnings_date, datetime):
+                earnings_date = earnings_date.date()
+            result["earnings_date"] = earnings_date.isoformat()
+            result["days_to_earnings"] = (earnings_date - date.today()).days
+    except Exception:
+        pass
+    return result
+
+
+def fetch_earnings_move_history(ticker: str, quarters: int = LEAPS_EARNINGS_HISTORY_QUARTERS) -> list[dict]:
+    """Best-effort historical price move bracketing each of the last `quarters` earnings
+    reports: the close on the last trading day strictly before the earnings date, versus the
+    close on the first trading day on/after it (this is the closest honest bracket available —
+    yfinance's earnings-date timestamps don't reliably say before-market vs. after-market).
+
+    Returns a list of {"date": iso, "pct_move": signed %, "abs_pct_move": %}, newest last.
+    Never raises — returns [] on any failure (missing data, network error, too-short history).
+    """
+    from datetime import date
+
+    try:
+        t = yf.Ticker(ticker)
+        edf = t.get_earnings_dates(limit=quarters + 4)
+        if edf is None or edf.empty:
+            return []
+        past_dates = sorted(d.date() for d in edf.index if d.date() < date.today())
+        past_dates = past_dates[-quarters:]
+        if not past_dates:
+            return []
+
+        hist = t.history(period="3y")
+        if hist.empty or "Close" not in hist:
+            return []
+        closes = hist["Close"].dropna()
+        if len(closes) < 2:
+            return []
+        trading_days = [ts.date() for ts in closes.index]
+
+        results = []
+        for earnings_date in past_dates:
+            prior_idx = None
+            for i, d in enumerate(trading_days):
+                if d < earnings_date:
+                    prior_idx = i
+                else:
+                    break
+            if prior_idx is None or prior_idx + 1 >= len(trading_days):
+                continue
+            prior_close = float(closes.iloc[prior_idx])
+            next_close = float(closes.iloc[prior_idx + 1])
+            if prior_close <= 0:
+                continue
+            pct_move = (next_close - prior_close) / prior_close * 100
+            results.append({
+                "date": earnings_date.isoformat(),
+                "pct_move": pct_move,
+                "abs_pct_move": abs(pct_move),
+            })
+        return results
+    except Exception:
+        return []
+
+
 def fetch_leaps_option_context(
     ticker: str, option_type: str, strike: float, expiration: str
 ) -> dict:
@@ -837,7 +942,7 @@ def fetch_leaps_option_context(
     that piece could not be fetched. Never raises; this is supplementary context for
     a manual-entry wizard, not a hard data requirement.
     """
-    from datetime import date, datetime
+    from datetime import datetime
 
     result: dict = {}
     t = yf.Ticker(ticker)
@@ -867,37 +972,12 @@ def fetch_leaps_option_context(
         pass
 
     # Next earnings date.
-    try:
-        earnings_date = None
-        cal = t.calendar
-        if isinstance(cal, dict) and cal.get("Earnings Date"):
-            earnings_date = cal["Earnings Date"][0]
-        if earnings_date is None:
-            edf = t.get_earnings_dates(limit=4)
-            if edf is not None and not edf.empty:
-                future = edf[edf.index.date >= date.today()]
-                if not future.empty:
-                    earnings_date = future.index[-1].date()
-        if earnings_date is not None:
-            if isinstance(earnings_date, datetime):
-                earnings_date = earnings_date.date()
-            result["earnings_date"] = earnings_date.isoformat()
-            result["days_to_earnings"] = (earnings_date - date.today()).days
-    except Exception:
-        pass
+    result.update(fetch_next_earnings_date(ticker))
 
-    # 1-year realized (historical) volatility — annualized stdev of daily log returns.
-    # Proxy for "average IV": yfinance has no historical implied-volatility series.
-    try:
-        import numpy as np
-
-        hist = t.history(period="1y")
-        if not hist.empty and len(hist) > 5:
-            log_returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
-            realized_vol = float(log_returns.std() * (252 ** 0.5))
-            result["realized_volatility"] = realized_vol * 100  # fraction -> percent
-    except Exception:
-        pass
+    # 1-year realized (historical) volatility — proxy for "average IV".
+    realized_vol = fetch_realized_volatility(ticker, period="1y")
+    if realized_vol is not None:
+        result["realized_volatility"] = realized_vol
 
     return result
 
