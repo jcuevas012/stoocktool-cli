@@ -4,7 +4,9 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
+from stocktool.analysis import build_leaps_earnings_context, leaps_earnings_move_stats
 from stocktool.data import fetch_earnings_move_history, fetch_next_earnings_date
+from stocktool.leaps import LeapsPosition
 
 
 class FetchEarningsMoveHistoryTests(unittest.TestCase):
@@ -83,6 +85,53 @@ class FetchNextEarningsDateTests(unittest.TestCase):
             result = fetch_next_earnings_date("TEST")
 
         self.assertEqual(result, {})
+
+
+class LeapsEarningsMoveStatsTests(unittest.TestCase):
+    def test_computes_avg_and_max_abs_move(self):
+        moves = [
+            {"date": "2026-01-01", "pct_move": 5.0, "abs_pct_move": 5.0},
+            {"date": "2026-04-01", "pct_move": -9.0, "abs_pct_move": 9.0},
+        ]
+        stats = leaps_earnings_move_stats(moves)
+
+        self.assertAlmostEqual(stats.avg_abs_move_pct, 7.0)
+        self.assertAlmostEqual(stats.max_abs_move_pct, 9.0)
+        self.assertEqual(stats.quarters_used, 2)
+
+    def test_empty_moves_returns_none(self):
+        self.assertIsNone(leaps_earnings_move_stats([]))
+
+
+class BuildLeapsEarningsContextTests(unittest.TestCase):
+    def make_position(self) -> LeapsPosition:
+        return LeapsPosition(
+            id="earn001", ticker="TEST", option_type="CALL", strike=100.0,
+            expiration="2028-01-01", premium=10.0, contracts=2,
+        )
+
+    def test_none_when_no_date_and_no_moves(self):
+        context = build_leaps_earnings_context(self.make_position(), 100.0, 0.8, None, None, [])
+
+        self.assertIsNone(context)
+
+    def test_computes_delta_only_impact_with_moves_and_delta(self):
+        moves = [{"date": "2026-01-01", "pct_move": 10.0, "abs_pct_move": 10.0}]
+        context = build_leaps_earnings_context(
+            self.make_position(), current_price=100.0, effective_delta=0.8,
+            next_earnings_date="2026-12-01", days_to_earnings=20, moves=moves,
+        )
+
+        self.assertEqual(context.avg_abs_move_pct, 10.0)
+        # delta_impact = 0.8 * 100 * 2 contracts * (100 * 10 / 100) = 1600.0
+        self.assertAlmostEqual(context.delta_impact_avg, 1600.0)
+
+    def test_date_only_with_no_moves_still_returns_context(self):
+        context = build_leaps_earnings_context(self.make_position(), 100.0, 0.8, "2026-12-01", 20, [])
+
+        self.assertIsNotNone(context)
+        self.assertIsNone(context.avg_abs_move_pct)
+        self.assertEqual(context.quarters_used, 0)
 
 
 if __name__ == "__main__":

@@ -1355,6 +1355,15 @@ def leaps_show(
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
     vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position)
     display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
+    earnings_info = data.fetch_next_earnings_date(position.ticker) if position.status == "ACTIVE" else {}
+    earnings_moves = data.fetch_earnings_move_history(position.ticker) if position.status == "ACTIVE" else []
+    effective_delta = snapshot.current_delta if snapshot.current_delta is not None else snapshot.entry_delta
+    earnings_context = analysis.build_leaps_earnings_context(
+        position, current_price, effective_delta,
+        earnings_info.get("earnings_date"), earnings_info.get("days_to_earnings"),
+        earnings_moves,
+    )
+    display.render_leaps_earnings_context(earnings_context)
 
     console.print()
     _render_leaps_value_check(position.ticker)
@@ -1478,6 +1487,15 @@ def leaps_update(
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
     vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position)
     display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
+    earnings_info = data.fetch_next_earnings_date(position.ticker) if position.status == "ACTIVE" else {}
+    earnings_moves = data.fetch_earnings_move_history(position.ticker) if position.status == "ACTIVE" else []
+    effective_delta = snapshot.current_delta if snapshot.current_delta is not None else snapshot.entry_delta
+    earnings_context = analysis.build_leaps_earnings_context(
+        position, current_price, effective_delta,
+        earnings_info.get("earnings_date"), earnings_info.get("days_to_earnings"),
+        earnings_moves,
+    )
+    display.render_leaps_earnings_context(earnings_context)
 
 
 # ---------------------------------------------------------------------------

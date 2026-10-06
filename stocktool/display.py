@@ -10,7 +10,7 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    LeapsSnapshot, LeapsScenario, LeapsGammaCurve, LeapsVegaImpact, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
+    LeapsSnapshot, LeapsScenario, LeapsGammaCurve, LeapsVegaImpact, LeapsEarningsContext, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
     leaps_leverage_color, leaps_exposure_color, leaps_decay_color, leaps_iv_value_verdict,
 )
@@ -2488,6 +2488,47 @@ def render_leaps_vega_section(
     console.print(Panel(
         "\n".join(lines),
         title="[bold magenta]Vega Analysis[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_earnings_context(context: Optional[LeapsEarningsContext]) -> None:
+    if context is None:
+        console.print(Panel(
+            "No earnings date or move history available for this ticker.",
+            title="[bold magenta]Earnings Context[/bold magenta]",
+            border_style="magenta",
+        ))
+        return
+    lines = []
+    if context.next_earnings_date is not None:
+        lines.append(f"Next earnings: {context.next_earnings_date} ({context.days_to_earnings} days away)")
+    else:
+        lines.append("Next earnings: unavailable")
+    if context.avg_abs_move_pct is not None:
+        lines.append(
+            f"Historical post-earnings move: avg ±{context.avg_abs_move_pct:.1f}% over last "
+            f"{context.quarters_used} quarters · max ±{context.max_abs_move_pct:.1f}%"
+        )
+        if context.delta_impact_avg is not None:
+            lines.append(
+                f"Delta-only projection — avg move: up → {context.delta_impact_avg:+,.0f}, "
+                f"down → {-context.delta_impact_avg:+,.0f}"
+            )
+        if context.delta_impact_max is not None:
+            lines.append(
+                f"Delta-only projection — max historical move: up → {context.delta_impact_max:+,.0f}, "
+                f"down → {-context.delta_impact_max:+,.0f}"
+            )
+        lines.append(
+            "[dim]Delta-only estimate — earnings often also moves IV sharply (usually down after "
+            "the report), and this tool has no reliable estimate of that IV change.[/dim]"
+        )
+    else:
+        lines.append(f"[dim]No earnings-move history available ({context.quarters_used} quarters found).[/dim]")
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Earnings Context[/bold magenta]",
         border_style="magenta",
     ))
 

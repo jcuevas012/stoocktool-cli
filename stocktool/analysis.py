@@ -1724,6 +1724,69 @@ def leaps_iv_rank(current_iv: Optional[float], iv_history: list) -> Optional[Lea
     )
 
 
+@dataclass
+class LeapsEarningsStats:
+    avg_abs_move_pct: float
+    max_abs_move_pct: float
+    quarters_used: int
+
+
+def leaps_earnings_move_stats(moves: list[dict]) -> Optional[LeapsEarningsStats]:
+    """Summary stats over fetch_earnings_move_history()'s per-quarter moves. None if empty."""
+    if not moves:
+        return None
+    abs_moves = [m["abs_pct_move"] for m in moves]
+    return LeapsEarningsStats(
+        avg_abs_move_pct=sum(abs_moves) / len(abs_moves),
+        max_abs_move_pct=max(abs_moves),
+        quarters_used=len(moves),
+    )
+
+
+@dataclass
+class LeapsEarningsContext:
+    ticker: str
+    next_earnings_date: Optional[str]
+    days_to_earnings: Optional[int]
+    avg_abs_move_pct: Optional[float]
+    max_abs_move_pct: Optional[float]
+    quarters_used: int
+    delta_impact_avg: Optional[float]  # dollar impact if the stock moves UP by avg_abs_move_pct;
+    delta_impact_max: Optional[float]  # negate for the down-move scenario (delta-only, symmetric)
+
+
+def build_leaps_earnings_context(
+    position: LeapsPosition,
+    current_price: Optional[float],
+    effective_delta: Optional[float],
+    next_earnings_date: Optional[str],
+    days_to_earnings: Optional[int],
+    moves: list[dict],
+) -> Optional[LeapsEarningsContext]:
+    """Combines historical earnings-move stats with this position's effective delta for a
+    delta-only projection (no IV-crush estimate — see spec Non-goals). None only when there's
+    neither an earnings date nor any move history to show.
+    """
+    stats = leaps_earnings_move_stats(moves)
+    if next_earnings_date is None and stats is None:
+        return None
+    delta_impact_avg = None
+    delta_impact_max = None
+    if stats is not None and effective_delta is not None and current_price is not None:
+        delta_impact_avg = effective_delta * 100 * position.contracts * (current_price * stats.avg_abs_move_pct / 100)
+        delta_impact_max = effective_delta * 100 * position.contracts * (current_price * stats.max_abs_move_pct / 100)
+    return LeapsEarningsContext(
+        ticker=position.ticker,
+        next_earnings_date=next_earnings_date,
+        days_to_earnings=days_to_earnings,
+        avg_abs_move_pct=stats.avg_abs_move_pct if stats else None,
+        max_abs_move_pct=stats.max_abs_move_pct if stats else None,
+        quarters_used=stats.quarters_used if stats else 0,
+        delta_impact_avg=delta_impact_avg,
+        delta_impact_max=delta_impact_max,
+    )
+
+
 def possible_return_verdict(pct: Optional[float]) -> tuple[str, str]:
     """Color + label for a valuation engine's possible_return_pct, mirroring build_valuation_snapshot's own convention."""
     if pct is None:
