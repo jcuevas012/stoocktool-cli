@@ -1105,11 +1105,15 @@ def leaps_add() -> None:
 
     market_iv = option_context.get("implied_volatility")
     realized_vol = option_context.get("realized_volatility")
-    if market_iv is not None and realized_vol:
-        iv_ratio = market_iv / realized_vol
+    iv_label, iv_color, iv_ratio = analysis.leaps_iv_value_verdict(market_iv, realized_vol)
+    if iv_label is not None:
         console.print(
             f"Market IV: {market_iv:.1f}% vs trailing 1Y realized volatility {realized_vol:.1f}% "
-            f"({iv_ratio:.2f}x). [dim]Context only: implied and realized volatility cover different periods and include different risk premia; this is not a fair-value verdict.[/dim]"
+            f"({iv_ratio:.2f}x) → [{iv_color}]{iv_label}[/{iv_color}]"
+        )
+        console.print(
+            "[dim]Proxy signal: yfinance has no historical-IV series, so this compares IV against "
+            "realized price movement, not a true IV percentile — a reminder, not a precise verdict.[/dim]"
         )
     elif market_iv is not None:
         console.print(f"Market IV: {market_iv:.1f}% [dim](realized volatility unavailable for comparison)[/dim]")
@@ -1312,7 +1316,8 @@ def leaps_show(
     current_price = data.get_current_prices([position.ticker]).get(position.ticker) if position.status == "ACTIVE" else None
     portfolio_value = _leaps_portfolio_value()
     option_quote = _get_leaps_option_quote(position)
-    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote)
+    realized_vol = data.fetch_realized_volatility(position.ticker) if position.status == "ACTIVE" else None
+    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote, realized_vol)
     display.render_leaps_detail(position, snapshot)
 
     if position.status == "CLOSED":
@@ -1335,6 +1340,8 @@ def leaps_show(
         position, gamma_iv, gamma_iv_source
     )
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position)
+    display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
 
     console.print()
     _render_leaps_value_check(position.ticker)
@@ -1443,7 +1450,8 @@ def leaps_update(
 
     current_price = data.get_current_prices([position.ticker]).get(position.ticker)
     portfolio_value = _leaps_portfolio_value()
-    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote)
+    realized_vol = data.fetch_realized_volatility(position.ticker)
+    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote, realized_vol)
     display.render_leaps_detail(position, snapshot)
     gamma_iv = current_iv
     gamma_iv_source = (
@@ -1455,6 +1463,8 @@ def leaps_update(
         position, gamma_iv, gamma_iv_source
     )
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position)
+    display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
 
 
 # ---------------------------------------------------------------------------

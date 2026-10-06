@@ -1472,6 +1472,52 @@ def build_leaps_gamma_curve(
     )
 
 @dataclass
+class LeapsVegaImpact:
+    """Dollar impact of IV moves, derived from a LeapsGammaCurve's current-spot vega."""
+    vega_per_contract: float  # $ per contract per 1 IV percentage point
+    vega_total: float         # vega_per_contract * contracts
+    impact_plus_10: float
+    impact_minus_10: float
+    impact_minus_20: float
+    entry_iv: Optional[float]
+    current_iv: Optional[float]
+    iv_change_pts: Optional[float]
+    vega_pnl_since_entry: Optional[float]
+
+
+def build_leaps_vega_impact(
+    curve: Optional["LeapsGammaCurve"], position: LeapsPosition
+) -> Optional[LeapsVegaImpact]:
+    """Dollar impact of IV moves, using today's model vega as a constant approximation across
+    the whole move since entry (vega itself drifts with price, time, and IV level).
+
+    Returns None only when the gamma curve itself is unavailable — vega_total is still
+    computable even with no IV history at all; only the "since entry" fields become None then.
+    """
+    if curve is None:
+        return None
+    vega_total = curve.vega * position.contracts
+    entry_iv = position.entry_iv
+    current_iv = position.current_iv if position.current_iv is not None else entry_iv
+    iv_change_pts = None
+    vega_pnl_since_entry = None
+    if entry_iv is not None and current_iv is not None:
+        iv_change_pts = current_iv - entry_iv
+        vega_pnl_since_entry = vega_total * iv_change_pts
+    return LeapsVegaImpact(
+        vega_per_contract=curve.vega,
+        vega_total=vega_total,
+        impact_plus_10=vega_total * 10,
+        impact_minus_10=vega_total * -10,
+        impact_minus_20=vega_total * -20,
+        entry_iv=entry_iv,
+        current_iv=current_iv,
+        iv_change_pts=iv_change_pts,
+        vega_pnl_since_entry=vega_pnl_since_entry,
+    )
+
+
+@dataclass
 class LeapsSnapshot:
     """Computed view of one LeapsPosition: entry data plus derived calculations."""
     id: str

@@ -10,9 +10,9 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    LeapsSnapshot, LeapsScenario, LeapsGammaCurve, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
+    LeapsSnapshot, LeapsScenario, LeapsGammaCurve, LeapsVegaImpact, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
-    leaps_leverage_color, leaps_exposure_color, leaps_decay_color,
+    leaps_leverage_color, leaps_exposure_color, leaps_decay_color, leaps_iv_value_verdict,
 )
 from .leaps import LeapsPosition
 from .portfolio import PortfolioSnapshot
@@ -2184,19 +2184,44 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     ))
 
 
-def _leaps_iv_history_lines(position: LeapsPosition) -> list[str]:
+def _leaps_current_iv_line(position: LeapsPosition, snapshot: LeapsSnapshot) -> str:
+    """Current IV line, tagged with the CHEAP/FAIR/EXPENSIVE signal when available."""
+    if position.current_iv is None:
+        return "  Current IV: N/A"
+    line = f"  Current IV: {position.current_iv:.1f}%"
+    if snapshot.iv_value_label is not None:
+        line += (
+            f" → [{snapshot.iv_value_color}]{snapshot.iv_value_label}[/{snapshot.iv_value_color}]"
+            f" ({snapshot.iv_value_ratio:.2f}x vs {snapshot.realized_volatility:.1f}% realized)"
+        )
+    return line
+
+
+def _leaps_iv_history_lines(position: LeapsPosition, snapshot: LeapsSnapshot) -> list[str]:
     """Lines for the IV History block: one reading per `leaps add`/`leaps update` run so far.
 
     yfinance has no historical-IV endpoint, so this can't show the past before the position
     was opened — only what's been captured (Yahoo market IV where available, else manual
-    entry) since. Builds up a real, if short, series over time.
+    entry) since. Builds up a real, if short, series over time. The latest reading is tagged
+    with its own CHEAP/FAIR/EXPENSIVE signal (vs. trailing realized volatility) so a beginner
+    gets a plain-word reminder, not just a number — older readings stay untagged since we
+    can't accurately recompute realized volatility as of a past date. Computed from the
+    reading's own IV value (not the snapshot's current/entry IV) so the label always matches
+    the number it sits next to.
     """
     if not position.iv_history:
         return ["  No IV history yet — run `stocktool leaps update` over time to start building this up."]
     lines = []
-    for reading in position.iv_history[-8:]:
+    last_index = len(position.iv_history) - 1
+    for i, reading in enumerate(position.iv_history[-8:]):
         tag = "[dim](yahoo)[/dim]" if reading.source == "yahoo" else "[dim](manual)[/dim]"
-        lines.append(f"  {reading.date}: {reading.iv:.1f}% {tag}")
+        actual_index = len(position.iv_history) - min(8, len(position.iv_history)) + i
+        line = f"  {reading.date}: {reading.iv:.1f}% {tag}"
+        if actual_index == last_index:
+            label, color, _ratio = leaps_iv_value_verdict(reading.iv, snapshot.realized_volatility)
+            if label is not None:
+                line += f"  → [{color}]{label}[/{color}]"
+        lines.append(line)
     if len(position.iv_history) > 8:
         lines.append(f"  [dim]...and {len(position.iv_history) - 8} earlier reading(s) not shown.[/dim]")
     if len(position.iv_history) >= 2:
@@ -2251,11 +2276,11 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
             else "  Current delta: N/A — run `stocktool leaps update` with a fresh reading from your broker"
         ),
         f"  Current theta: -${abs(position.current_theta):.2f}/day" if position.current_theta is not None else "  Current theta: N/A",
-        f"  Current IV: {position.current_iv:.1f}%" if position.current_iv is not None else "  Current IV: N/A",
+        _leaps_current_iv_line(position, snapshot),
         f"  Last updated: {position.last_updated}" if position.last_updated else "  Last updated: never — entry values are the only reading on file",
         "",
         "[bold cyan]IV History[/bold cyan]",
-        *_leaps_iv_history_lines(position),
+        *_leaps_iv_history_lines(position, snapshot),
         "",
         "[bold cyan]Computed[/bold cyan]",
         f"  Breakeven: ${snapshot.breakeven:.2f}" if snapshot.breakeven is not None else "  Breakeven: N/A",
@@ -2393,6 +2418,51 @@ def render_leaps_gamma_chart(
         "\n".join(lines),
         title=f"[bold cyan]LEAPS Gamma and Delta · {curve.ticker} {curve.option_type}[/bold cyan]",
         border_style="cyan",
+    ))
+
+
+def render_leaps_vega_section(
+    curve: Optional[LeapsGammaCurve],
+    impact: Optional[LeapsVegaImpact],
+    unavailable_reason: Optional[str],
+) -> None:
+    """Vega and its dollar impact — reuses the same model inputs as the gamma/delta chart."""
+    if curve is None or impact is None:
+        console.print(Panel(
+            unavailable_reason or "Vega unavailable; missing model inputs.",
+            title="[bold magenta]Vega Analysis[/bold magenta]",
+            border_style="magenta",
+        ))
+        return
+    lines = [
+        f"Current vega: ${impact.vega_per_contract:,.2f} per contract per 1pt IV move "
+        f"(${impact.vega_total:,.2f} total for this position)",
+        f"  Impact of +10 IV points: [green]+${impact.impact_plus_10:,.2f}[/green]",
+        f"  Impact of -10 IV points: [red]{impact.impact_minus_10:,.2f}[/red]  (pre-earnings-crush scenario)",
+        f"  Impact of -20 IV points: [red]{impact.impact_minus_20:,.2f}[/red]  (panic-crush scenario)",
+        "",
+    ]
+    if impact.entry_iv is not None:
+        lines.append(f"Entry IV: {impact.entry_iv:.1f}%")
+    if impact.current_iv is not None:
+        lines.append(f"Current IV: {impact.current_iv:.1f}%")
+    if impact.iv_change_pts is not None:
+        arrow = "↑" if impact.iv_change_pts > 0 else ("↓" if impact.iv_change_pts < 0 else "→")
+        pnl_color = "green" if impact.vega_pnl_since_entry >= 0 else "red"
+        lines.append(f"IV change since entry: {arrow} {impact.iv_change_pts:+.1f}pts")
+        lines.append(
+            f"Vega P&L contribution since entry: [{pnl_color}]~${impact.vega_pnl_since_entry:+,.2f}[/{pnl_color}]"
+        )
+    else:
+        lines.append("IV change since entry: N/A — needs both an entry IV and a current/fallback IV")
+    lines.append(
+        "[dim]Uses today's vega as a constant approximation across the whole move since entry — "
+        "vega itself drifts with price, time, and IV level.[/dim]"
+    )
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Vega Analysis[/bold magenta]",
+        border_style="magenta",
     ))
 
 
