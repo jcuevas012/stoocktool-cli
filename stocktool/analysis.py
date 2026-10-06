@@ -1566,6 +1566,12 @@ class LeapsSnapshot:
     iv_value_ratio: Optional[float] = None
     iv_value_label: Optional[str] = None
     iv_value_color: str = "dim"
+    iv_rank_pct: Optional[float] = None
+    iv_rank_label: Optional[str] = None
+    iv_rank_color: str = "dim"
+    iv_range_low: Optional[float] = None
+    iv_range_high: Optional[float] = None
+    iv_rank_reading_count: int = 0
 
 
 def leaps_dte_color(days_to_expiry: Optional[int]) -> str:
@@ -1682,6 +1688,42 @@ def leaps_iv_value_verdict(
     return "FAIR", "yellow", ratio
 
 
+@dataclass
+class LeapsIvRank:
+    rank_pct: float
+    label: str
+    color: str
+    range_low: float
+    range_high: float
+    reading_count: int
+
+
+def leaps_iv_rank(current_iv: Optional[float], iv_history: list) -> Optional[LeapsIvRank]:
+    """IV percentile against this position's own accumulated history. Boundaries are
+    inclusive on the lower bucket (exactly 30.0 is CHEAP, exactly 60.0 is NORMAL, etc.)."""
+    from .config import (
+        LEAPS_IV_RANK_MIN_READINGS, LEAPS_IV_RANK_CHEAP_MAX,
+        LEAPS_IV_RANK_NORMAL_MAX, LEAPS_IV_RANK_ELEVATED_MAX,
+    )
+    if current_iv is None or len(iv_history) < LEAPS_IV_RANK_MIN_READINGS:
+        return None
+    values = [r.iv for r in iv_history]
+    low, high = min(values), max(values)
+    rank_pct = 50.0 if high == low else max(0.0, min(100.0, (current_iv - low) / (high - low) * 100))
+    if rank_pct <= LEAPS_IV_RANK_CHEAP_MAX:
+        label, color = "CHEAP", "green"
+    elif rank_pct <= LEAPS_IV_RANK_NORMAL_MAX:
+        label, color = "NORMAL", "yellow"
+    elif rank_pct <= LEAPS_IV_RANK_ELEVATED_MAX:
+        label, color = "ELEVATED", "orange3"
+    else:
+        label, color = "EXPENSIVE", "red"
+    return LeapsIvRank(
+        rank_pct=rank_pct, label=label, color=color,
+        range_low=low, range_high=high, reading_count=len(iv_history),
+    )
+
+
 def possible_return_verdict(pct: Optional[float]) -> tuple[str, str]:
     """Color + label for a valuation engine's possible_return_pct, mirroring build_valuation_snapshot's own convention."""
     if pct is None:
@@ -1786,9 +1828,11 @@ def build_leaps_snapshot(
                 leverage_ratio = abs(effective_delta * current_price) / theoretical_current_value
 
     iv_value_label, iv_value_color, iv_value_ratio = None, "dim", None
+    iv_rank = None
     if is_active:
         latest_iv = position.current_iv if position.current_iv is not None else position.entry_iv
         iv_value_label, iv_value_color, iv_value_ratio = leaps_iv_value_verdict(latest_iv, realized_vol)
+        iv_rank = leaps_iv_rank(latest_iv, position.iv_history)
 
     return LeapsSnapshot(
         id=position.id,
@@ -1834,6 +1878,12 @@ def build_leaps_snapshot(
         iv_value_ratio=iv_value_ratio,
         iv_value_label=iv_value_label,
         iv_value_color=iv_value_color,
+        iv_rank_pct=iv_rank.rank_pct if iv_rank else None,
+        iv_rank_label=iv_rank.label if iv_rank else None,
+        iv_rank_color=iv_rank.color if iv_rank else "dim",
+        iv_range_low=iv_rank.range_low if iv_rank else None,
+        iv_range_high=iv_rank.range_high if iv_rank else None,
+        iv_rank_reading_count=len(position.iv_history),
     )
 
 
