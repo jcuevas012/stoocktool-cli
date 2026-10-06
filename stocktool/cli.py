@@ -1364,6 +1364,7 @@ def leaps_show(
         earnings_moves,
     )
     display.render_leaps_earnings_context(earnings_context)
+    display.render_leaps_liquidity(option_quote, position.contracts)
 
     console.print()
     _render_leaps_value_check(position.ticker)
@@ -1496,6 +1497,7 @@ def leaps_update(
         earnings_moves,
     )
     display.render_leaps_earnings_context(earnings_context)
+    display.render_leaps_liquidity(option_quote, position.contracts)
 
 
 # ---------------------------------------------------------------------------

@@ -747,6 +747,8 @@ def fetch_leaps_option_quote(ticker: str, option_type: str, strike: float, expir
         bid = _safe_float(row.get("bid"))
         ask = _safe_float(row.get("ask"))
         iv = _safe_float(row.get("impliedVolatility"))
+        volume = _safe_float(row.get("volume"))
+        open_interest = _safe_float(row.get("openInterest"))
         last_trade = row.get("lastTradeDate")
         if bid is not None:
             result["bid"] = bid
@@ -757,6 +759,10 @@ def fetch_leaps_option_quote(ticker: str, option_type: str, strike: float, expir
             result["spread_pct"] = ((ask - bid) / ((ask + bid) / 2) * 100) if ask + bid else None
         if iv is not None:
             result["implied_volatility"] = iv * 100
+        if volume is not None:
+            result["volume"] = volume
+        if open_interest is not None:
+            result["open_interest"] = open_interest
         if last_trade is not None and hasattr(last_trade, "isoformat"):
             result["last_trade_at"] = last_trade.isoformat()
     except Exception:
@@ -968,6 +974,12 @@ def fetch_leaps_option_context(
             iv = _safe_float(row.get("impliedVolatility"))
             if iv is not None:
                 result["implied_volatility"] = iv * 100  # fraction -> percent
+            volume = _safe_float(row.get("volume"))
+            open_interest = _safe_float(row.get("openInterest"))
+            if volume is not None:
+                result["volume"] = volume
+            if open_interest is not None:
+                result["open_interest"] = open_interest
     except Exception:
         pass
 

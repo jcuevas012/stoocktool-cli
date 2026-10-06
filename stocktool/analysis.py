@@ -1787,6 +1787,25 @@ def build_leaps_earnings_context(
     )
 
 
+def leaps_liquidity_rating(spread_pct: Optional[float], open_interest: Optional[float]) -> tuple[str, str]:
+    """Liquidity rating from spread-of-mid and open interest. ('N/A', 'dim') when either input
+    is missing — never guesses at liquidity from partial data."""
+    from .config import (
+        LEAPS_LIQUIDITY_TIGHT_SPREAD_PCT, LEAPS_LIQUIDITY_MODERATE_SPREAD_PCT,
+        LEAPS_LIQUIDITY_WIDE_SPREAD_PCT, LEAPS_LIQUIDITY_TIGHT_OI,
+        LEAPS_LIQUIDITY_MODERATE_OI, LEAPS_LIQUIDITY_WIDE_OI,
+    )
+    if spread_pct is None or open_interest is None:
+        return "N/A", "dim"
+    if spread_pct < LEAPS_LIQUIDITY_TIGHT_SPREAD_PCT and open_interest > LEAPS_LIQUIDITY_TIGHT_OI:
+        return "TIGHT", "green"
+    if spread_pct < LEAPS_LIQUIDITY_MODERATE_SPREAD_PCT and open_interest > LEAPS_LIQUIDITY_MODERATE_OI:
+        return "MODERATE", "yellow"
+    if spread_pct < LEAPS_LIQUIDITY_WIDE_SPREAD_PCT and open_interest > LEAPS_LIQUIDITY_WIDE_OI:
+        return "WIDE", "orange3"
+    return "ILLIQUID", "red"
+
+
 def possible_return_verdict(pct: Optional[float]) -> tuple[str, str]:
     """Color + label for a valuation engine's possible_return_pct, mirroring build_valuation_snapshot's own convention."""
     if pct is None:

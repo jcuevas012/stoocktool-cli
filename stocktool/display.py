@@ -13,6 +13,7 @@ from .analysis import (
     LeapsSnapshot, LeapsScenario, LeapsGammaCurve, LeapsVegaImpact, LeapsEarningsContext, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
     leaps_leverage_color, leaps_exposure_color, leaps_decay_color, leaps_iv_value_verdict,
+    leaps_liquidity_rating,
 )
 from .leaps import LeapsPosition
 from .portfolio import PortfolioSnapshot
@@ -2529,6 +2530,39 @@ def render_leaps_earnings_context(context: Optional[LeapsEarningsContext]) -> No
     console.print(Panel(
         "\n".join(lines),
         title="[bold magenta]Earnings Context[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_liquidity(option_quote: dict, contracts: int) -> None:
+    """Bid/ask/volume/open-interest context — passed straight from the already-fetched quote
+    dict rather than stored on LeapsSnapshot, since both callers already hold it in scope."""
+    bid, ask, mid = option_quote.get("bid"), option_quote.get("ask"), option_quote.get("mid")
+    spread_pct = option_quote.get("spread_pct")
+    volume, open_interest = option_quote.get("volume"), option_quote.get("open_interest")
+    rating_label, rating_color = leaps_liquidity_rating(spread_pct, open_interest)
+    lines = []
+    if bid is not None and ask is not None:
+        mid_str = f"  Mid: ${mid:.2f}" if mid is not None else ""
+        lines.append(f"Bid/Ask: ${bid:.2f} / ${ask:.2f}{mid_str}")
+        if spread_pct is not None:
+            spread_cost = (ask - bid) * 100 * contracts
+            lines.append(
+                f"Spread: ${ask - bid:.2f} ({spread_pct:.1f}% of mid) · round-trip cost estimate: "
+                f"~${spread_cost:,.2f} [dim](estimate, not a guaranteed execution cost)[/dim]"
+            )
+    else:
+        lines.append("Bid/Ask: unavailable")
+    if open_interest is not None:
+        lines.append(f"Open interest: {open_interest:,.0f} contracts")
+    if volume is not None:
+        lines.append(f"Volume (latest session): {volume:,.0f} contracts")
+    if volume is not None and open_interest:
+        lines.append(f"Volume/OI ratio: {volume / open_interest:.2f}")
+    lines.append(f"Liquidity rating: [{rating_color}]{rating_label}[/{rating_color}]")
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Market Liquidity[/bold magenta]",
         border_style="magenta",
     ))
 
