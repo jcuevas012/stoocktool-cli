@@ -1352,6 +1352,7 @@ class LeapsGammaCurve:
     spot: float
     model_delta: float
     gamma: float  # change in delta per $1 underlying move
+    vega: float   # dollars per contract per 1 IV-percentage-point move, at the current spot
     implied_volatility_pct: float
     risk_free_rate_pct: float
     dividend_yield_pct: float
@@ -1367,7 +1368,11 @@ def _normal_cdf(value: float) -> float:
     return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
 
 
-def _black_scholes_delta_gamma(
+def _normal_pdf(value: float) -> float:
+    return math.exp(-0.5 * value ** 2) / math.sqrt(2.0 * math.pi)
+
+
+def _black_scholes_greeks(
     option_type: str,
     stock_price: float,
     strike: float,
@@ -1375,8 +1380,14 @@ def _black_scholes_delta_gamma(
     volatility: float,
     risk_free_rate: float,
     dividend_yield: float,
-) -> tuple[float, float]:
-    """Return European Black–Scholes delta and gamma using continuous rates/yield."""
+) -> tuple[float, float, float]:
+    """Return European Black–Scholes delta, gamma, and vega using continuous rates/yield.
+
+    Vega is scaled to dollars per contract per 1 percentage-point change in IV: the textbook
+    per-share vega (dollars per 1.00 = 100-point change in vol) divided by 100 for one
+    percentage point, multiplied by 100 shares per contract — the two scalings cancel, so the
+    raw S × e^(-qT) × φ(d1) × √T already is the right number.
+    """
     if min(stock_price, strike, years_to_expiry, volatility) <= 0:
         raise ValueError("stock price, strike, time, and volatility must be positive")
     root_t = math.sqrt(years_to_expiry)
@@ -1391,10 +1402,10 @@ def _black_scholes_delta_gamma(
         delta = discounted_dividend * (_normal_cdf(d1) - 1.0)
     else:
         raise ValueError("option_type must be CALL or PUT")
-    gamma = discounted_dividend * math.exp(-0.5 * d1**2) / (
-        stock_price * volatility * root_t * math.sqrt(2.0 * math.pi)
-    )
-    return delta, gamma
+    pdf_d1 = _normal_pdf(d1)
+    gamma = discounted_dividend * pdf_d1 / (stock_price * volatility * root_t)
+    vega = stock_price * discounted_dividend * pdf_d1 * root_t
+    return delta, gamma, vega
 
 
 def build_leaps_gamma_curve(
@@ -1429,7 +1440,7 @@ def build_leaps_gamma_curve(
     volatility = implied_volatility_pct / 100.0
     risk_free = risk_free_rate_pct / 100.0
     dividend_yield = dividend_yield_pct / 100.0
-    model_delta, gamma = _black_scholes_delta_gamma(
+    model_delta, gamma, vega = _black_scholes_greeks(
         position.option_type, stock_price, position.strike, years, volatility, risk_free, dividend_yield
     )
 
@@ -1437,7 +1448,7 @@ def build_leaps_gamma_curve(
     for index in range(point_count):
         offset_pct = -price_range_pct + 2 * price_range_pct * index / (point_count - 1)
         scenario_price = stock_price * (1 + offset_pct / 100.0)
-        scenario_delta, _ = _black_scholes_delta_gamma(
+        scenario_delta, _, _ = _black_scholes_greeks(
             position.option_type, scenario_price, position.strike, years, volatility, risk_free, dividend_yield
         )
         points.append(LeapsGammaPoint(stock_price=scenario_price, delta=scenario_delta))
@@ -1448,6 +1459,7 @@ def build_leaps_gamma_curve(
         spot=stock_price,
         model_delta=model_delta,
         gamma=gamma,
+        vega=vega,
         implied_volatility_pct=implied_volatility_pct,
         risk_free_rate_pct=risk_free_rate_pct,
         dividend_yield_pct=dividend_yield_pct,
@@ -1503,6 +1515,11 @@ class LeapsSnapshot:
     effective_position_pct: Optional[float] = None
     leverage_ratio: Optional[float] = None
     realized_pnl: Optional[float] = None
+    # --- IV value signal (cheap/fair/expensive vs. realized volatility proxy) ---
+    realized_volatility: Optional[float] = None
+    iv_value_ratio: Optional[float] = None
+    iv_value_label: Optional[str] = None
+    iv_value_color: str = "dim"
 
 
 def leaps_dte_color(days_to_expiry: Optional[int]) -> str:
@@ -1599,6 +1616,26 @@ def leaps_exposure_color(effective_position_pct: Optional[float]) -> str:
     return "green"
 
 
+def leaps_iv_value_verdict(
+    market_iv: Optional[float], realized_vol: Optional[float]
+) -> tuple[Optional[str], str, Optional[float]]:
+    """Classify a LEAPS contract's market IV as CHEAP/FAIR/EXPENSIVE against trailing realized
+    volatility — the free-data proxy for "average IV" used throughout this tool, since yfinance
+    has no historical-implied-volatility series. A beginner-facing signal, not a precise IV rank.
+
+    Returns (label, color, ratio) — label and ratio are None when either input is missing.
+    """
+    if market_iv is None or not realized_vol:
+        return None, "dim", None
+    from .config import LEAPS_IV_CHEAP_RATIO, LEAPS_IV_EXPENSIVE_RATIO
+    ratio = market_iv / realized_vol
+    if ratio <= LEAPS_IV_CHEAP_RATIO:
+        return "CHEAP", "green", ratio
+    if ratio >= LEAPS_IV_EXPENSIVE_RATIO:
+        return "EXPENSIVE", "red", ratio
+    return "FAIR", "yellow", ratio
+
+
 def possible_return_verdict(pct: Optional[float]) -> tuple[str, str]:
     """Color + label for a valuation engine's possible_return_pct, mirroring build_valuation_snapshot's own convention."""
     if pct is None:
@@ -1617,6 +1654,7 @@ def build_leaps_snapshot(
     current_price: Optional[float],
     portfolio_value: Optional[float] = None,
     option_quote: Optional[dict] = None,
+    realized_vol: Optional[float] = None,
 ) -> LeapsSnapshot:
     option_quote = option_quote or {}
     is_active = position.status == "ACTIVE"
@@ -1701,6 +1739,11 @@ def build_leaps_snapshot(
             if theoretical_current_value and theoretical_current_value > 0:
                 leverage_ratio = abs(effective_delta * current_price) / theoretical_current_value
 
+    iv_value_label, iv_value_color, iv_value_ratio = None, "dim", None
+    if is_active:
+        latest_iv = position.current_iv if position.current_iv is not None else position.entry_iv
+        iv_value_label, iv_value_color, iv_value_ratio = leaps_iv_value_verdict(latest_iv, realized_vol)
+
     return LeapsSnapshot(
         id=position.id,
         ticker=position.ticker,
@@ -1741,6 +1784,10 @@ def build_leaps_snapshot(
         effective_position_pct=effective_position_pct,
         leverage_ratio=leverage_ratio,
         realized_pnl=position.realized_pnl if not is_active else None,
+        realized_volatility=realized_vol if is_active else None,
+        iv_value_ratio=iv_value_ratio,
+        iv_value_label=iv_value_label,
+        iv_value_color=iv_value_color,
     )
 
 

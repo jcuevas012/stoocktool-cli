@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from stocktool.analysis import _black_scholes_delta_gamma, build_leaps_gamma_curve, build_leaps_snapshot
+from stocktool.analysis import _black_scholes_greeks, build_leaps_gamma_curve, build_leaps_snapshot
 from stocktool.data import fetch_leaps_gamma_inputs
 from stocktool.leaps import LeapsPosition
 
@@ -51,9 +51,9 @@ class LeapsGammaCurveTests(unittest.TestCase):
     def test_gamma_matches_local_delta_change_per_dollar(self):
         years = 1.0
         args = ("CALL", 100.0, 100.0, years, 0.30, 0.04, 0.01)
-        _, gamma = _black_scholes_delta_gamma(*args)
-        delta_up, _ = _black_scholes_delta_gamma("CALL", 101.0, *args[2:])
-        delta_down, _ = _black_scholes_delta_gamma("CALL", 99.0, *args[2:])
+        _, gamma, _ = _black_scholes_greeks(*args)
+        delta_up, _, _ = _black_scholes_greeks("CALL", 101.0, *args[2:])
+        delta_down, _, _ = _black_scholes_greeks("CALL", 99.0, *args[2:])
 
         self.assertAlmostEqual(gamma, (delta_up - delta_down) / 2.0, delta=0.00001)
 
@@ -104,6 +104,31 @@ class LeapsGammaCurveTests(unittest.TestCase):
 
         self.assertIsNone(expired)
         self.assertIsNone(zero_volatility)
+
+    def test_vega_matches_hand_computed_value(self):
+        # S=100, K=100, T=1y, sigma=0.30, r=0.04, q=0.01 — same inputs as the gamma test above.
+        # d1 = (ln(100/100) + (0.04 - 0.01 + 0.5*0.3^2)*1) / (0.3*1) = 0.0750 / 0.3 = 0.25
+        # phi(d1) = exp(-0.5*0.25^2) / sqrt(2*pi) = 0.38667
+        # vega = 100 * exp(-0.01*1) * 0.38667 * sqrt(1) = 38.2821 (within rounding)
+        from stocktool.analysis import _black_scholes_greeks
+
+        _, _, vega = _black_scholes_greeks("CALL", 100.0, 100.0, 1.0, 0.30, 0.04, 0.01)
+
+        self.assertAlmostEqual(vega, 38.282, places=2)
+
+    def test_vega_is_identical_for_call_and_put_same_strike(self):
+        from stocktool.analysis import _black_scholes_greeks
+
+        _, _, call_vega = _black_scholes_greeks("CALL", 100.0, 100.0, 1.0, 0.30, 0.04, 0.01)
+        _, _, put_vega = _black_scholes_greeks("PUT", 100.0, 100.0, 1.0, 0.30, 0.04, 0.01)
+
+        self.assertAlmostEqual(call_vega, put_vega, places=6)
+
+    def test_curve_exposes_vega_at_current_spot(self):
+        curve = self.build("CALL")
+
+        self.assertIsNotNone(curve)
+        self.assertGreater(curve.vega, 0.0)
 
     def test_market_inputs_keep_documented_yahoo_yield_units_and_dates(self):
         as_of = pd.Timestamp(date.today())
