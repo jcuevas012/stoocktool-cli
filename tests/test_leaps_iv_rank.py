@@ -1,7 +1,8 @@
 import unittest
+from datetime import date, timedelta
 
-from stocktool.analysis import leaps_iv_rank
-from stocktool.leaps import IvReading
+from stocktool.analysis import build_leaps_scenario, leaps_iv_rank
+from stocktool.leaps import IvReading, LeapsPosition
 
 
 def readings(*values: float) -> list[IvReading]:
@@ -46,6 +47,23 @@ class LeapsIvRankTests(unittest.TestCase):
 
     def test_none_current_iv_returns_none(self):
         self.assertIsNone(leaps_iv_rank(None, readings(20, 25, 30, 35, 40)))
+
+
+class ScenarioIvWarningTests(unittest.TestCase):
+    """build_leaps_scenario's warning text must not claim IV history isn't tracked — it is,
+    via LeapsPosition.record_iv_reading and analysis.leaps_iv_rank."""
+
+    def test_entry_iv_warning_does_not_claim_no_iv_history_tracking(self):
+        position = LeapsPosition(
+            id="scn001", ticker="TEST", option_type="CALL", strike=100.0,
+            expiration=(date.today() + timedelta(days=365)).isoformat(), premium=10.0,
+            entry_stock_price=100.0, entry_iv=30.0,
+        )
+        scenario = build_leaps_scenario(position, current_price=100.0)
+
+        joined = " ".join(scenario.warnings)
+        self.assertNotIn("doesn't track IV history", joined)
+        self.assertIn("leaps show", joined)
 
 
 if __name__ == "__main__":

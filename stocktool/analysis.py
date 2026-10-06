@@ -2105,8 +2105,9 @@ def build_leaps_scenario(
     warnings: list[str] = []
     if position.entry_iv is not None:
         warnings.append(
-            f"IV at entry: {position.entry_iv:.1f}% — recheck current IV rank with your broker; "
-            "this tool doesn't track IV history."
+            f"IV at entry: {position.entry_iv:.1f}% — this tool tracks IV Rank over time via "
+            "`leaps show`/`leaps update`; check there for the current percentile against this "
+            "position's own history."
         )
     warnings.append(
         "Confirm the next earnings date before entering or exiting — earnings can cause a gap and a change in implied volatility; direction and size are uncertain."
