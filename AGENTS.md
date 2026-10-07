@@ -314,7 +314,7 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 
 ## DCF Intrinsic Value (Section 7 of `stocktool valuation`)
 
-Appended automatically to every `valuation` panel. Implements a 10-step Buffett Owner Earnings DCF.
+Appended automatically to every `valuation` panel. Implements a simplified 10-step Owner Earnings DCF estimate; total CapEx and latest-year cash-flow data are proxies, not a full Buffett maintenance-capital analysis.
 
 **Additional data fetched:** `fetch_cashflow_basics()` in `data.py` pulls depreciation + capex from the annual cashflow statement (same session as the other valuation fetches).
 
@@ -322,9 +322,9 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 
 | Step | Description |
 |------|-------------|
-| 1 | Normalized Net Income = Revenue Est. × Profit Margin (fallback: FCF) |
-| 2 | Owner Earnings = NI + Depreciation + CapEx (yfinance capex is negative) |
-| 3 | Growth Rate — conservative: avg(revenue_growth, eps_growth) capped by ROE tier |
+| 1 | Forecast Net Income = Next-Year Revenue Estimate × Current Profit Margin |
+| 2 | Owner Earnings proxy = NI + Depreciation + total CapEx (yfinance CapEx is negative) |
+| 3 | Growth Rate — average available revenue/EPS growth, including negative signals, capped by ROE tier; held constant as a scenario assumption; 0% if growth data is missing |
 | 4 | Discount Rate = 10% |
 | 5 | Terminal Growth = 2.5% |
 | 6 | Present Value of Owner Earnings = PV(10yr OE) + PV(Terminal Value) |
@@ -334,10 +334,11 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | 10 | Rating based on margin of safety |
 
 **Growth rate selection (in `analysis._select_dcf_growth_rate`):**
-- High-ROIC (ROE > 25%) + avg growth ≥ 10% → cap at 15%
-- Solid allocator (ROE > 15% or avg growth ≥ 8%) → cap at 12%
+- Negative growth inputs must not be discarded. Average all available revenue/EPS growth inputs; use 0% only when both are missing.
+- ROE proxy > 25% + avg growth ≥ 10% → cap at 15%
+- ROE proxy > 15% or avg growth ≥ 8% → cap at 12%
 - Mature/average → cap at 8%
-- No positive growth signals → default 4%
+- Cap extreme decline assumptions at -50% so yearly cash flows do not reverse sign from noisy growth data; disclose when this floor applies.
 
 **Rating thresholds:**
 
@@ -350,12 +351,12 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | < 5% | ★ Overvalued |
 
 **Fallback logic for Owner Earnings:**
-1. If D&A + CapEx from cashflow available → full formula
-2. Else if FCF > 0 → FCF used as proxy
-3. Else if NI > 0 → NI used as fallback
-4. If none positive → DCF section shows "insufficient data"
+1. If forecast NI, D&A, and total CapEx from cashflow are available → NI + D&A + total CapEx (CapEx is negative)
+2. Else if trailing FCF > 0 → FCF used as a current-year proxy, even when next-year revenue estimates are unavailable
+3. Else if forecast NI > 0 → NI used as a forward proxy
+4. If no positive owner-earnings proxy is available → DCF section explains which input classes are needed
 
-**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The report names the PV and equity value accordingly. It surfaces when FCF or net income proxies are used, and notes that latest-year D&A/total CapEx are combined with forecast net income and working-capital changes are not included. A per-share sensitivity range uses growth ±2 percentage points and discount rates of 8%/12%; it is a model sensitivity, not a confidence interval.
+**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The report names the PV and equity value accordingly. The selected growth rate is held constant through the explicit forecast period as a scenario assumption, not a forecast. For forward owner earnings, year-one cash flow is the provided estimate and is not grown a second time before discounting; trailing FCF proxy starts from the current year and grows into year one. It notes that latest-year D&A/total CapEx are paired with forecast net income and working-capital changes are not included. Total CapEx is a proxy for maintenance CapEx, not an estimate of maintenance needs. A per-share sensitivity range uses starting growth ±2 percentage points and discount rates of 8%/12%; it is a model sensitivity, not a confidence interval.
 
 **Historical P/E context:** This valuation path does not use historical EPS. Its 6-month and 3-year values therefore use mean historical price divided by current trailing EPS and must be labeled as price/current-EPS proxies, never as historical P/E. The 3-year price data end date is shown so users can judge price-data freshness. Do not present this proxy as a decisive valuation signal without making the limitation visible.
 

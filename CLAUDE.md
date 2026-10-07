@@ -274,6 +274,7 @@ Fetches: `.info` fundamentals + 3-year price history (also sliced for the 6-mont
 | 6 | Analyst Price Targets | Low / Mean / High price targets, upside %, analyst count, consensus, 200-day SMA & % vs price | `targetLowPrice`, `targetMeanPrice`, `targetHighPrice`, `recommendationKey`, `data.fetch_sma_data()` |
 | — | Valuation Projection | Revenue × margin = earnings; earnings × avg PE = future market cap → possible return | computed |
 | 8 | Earnings Growth Trend | Quarterly & annual Revenue/Net Income, net margin, QoQ/YoY growth, margin trend | `data.fetch_earnings_history()` — see dedicated section below |
+| 9 | Institutional Ownership & Flow | Institutional/insider ownership %, top-10 holders, $-weighted net institutional flow | `data.fetch_institutional_ownership()` — see dedicated section below |
 
 **Three-Year Price Context:** `cli.py`'s `valuation` command fetches 3 years of price history in one call; the 6-month price/EPS proxy is sliced from that data. Both proxies divide mean prices by current trailing EPS, so neither represents historical P/E. The comparison of current P/E with the 3-year proxy reduces algebraically to current price versus the 3-year mean price; it is price context, not a cheap/expensive verdict. The report displays the last price-history date and identifies this limitation in terminal and HTML output.
 
@@ -304,7 +305,7 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 
 ## DCF Intrinsic Value (Section 7 of `stocktool valuation`)
 
-Appended automatically to every `valuation` panel. Implements a 10-step Buffett Owner Earnings DCF.
+Appended automatically to every `valuation` panel. Implements a simplified 10-step Owner Earnings DCF estimate; total CapEx and latest-year cash-flow data are proxies, not a full Buffett maintenance-capital analysis.
 
 **Additional data fetched:** `fetch_cashflow_basics()` in `data.py` pulls depreciation + capex from the annual cashflow statement (same session as the other valuation fetches).
 
@@ -312,22 +313,23 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 
 | Step | Description |
 |------|-------------|
-| 1 | Normalized Net Income = Revenue Est. × Profit Margin (fallback: FCF) |
-| 2 | Owner Earnings = NI + Depreciation + CapEx (yfinance capex is negative) |
-| 3 | Growth Rate — conservative: avg(revenue_growth, eps_growth) capped by ROE tier |
+| 1 | Forecast Net Income = Next-Year Revenue Estimate × Current Profit Margin |
+| 2 | Owner Earnings proxy = NI + Depreciation + total CapEx (yfinance CapEx is negative) |
+| 3 | Growth Rate — average available revenue/EPS growth, including negative signals, capped by ROE tier; held constant as a scenario assumption; 0% if growth data is missing |
 | 4 | Discount Rate = 10% |
 | 5 | Terminal Growth = 2.5% |
-| 6 | Enterprise Value = PV(10yr OE) + PV(Terminal Value) |
-| 7 | Equity Value = EV + Cash − Debt |
+| 6 | Equity Value = PV(10yr Owner Earnings) + PV(Terminal Value) |
+| 7 | No cash/debt adjustment: cash flows start from net income, an equity cash-flow basis |
 | 8 | Intrinsic Value Per Share = Equity Value / Shares Outstanding |
 | 9 | Margin of Safety = (IV − Price) / IV × 100 |
 | 10 | Rating based on margin of safety |
 
 **Growth rate selection (in `analysis._select_dcf_growth_rate`):**
-- High-ROIC (ROE > 25%) + avg growth ≥ 10% → cap at 15%
-- Solid allocator (ROE > 15% or avg growth ≥ 8%) → cap at 12%
+- Negative growth inputs must not be discarded. Average all available revenue/EPS growth inputs; use 0% only when both are missing.
+- ROE proxy > 25% + avg growth ≥ 10% → cap at 15%
+- ROE proxy > 15% or avg growth ≥ 8% → cap at 12%
 - Mature/average → cap at 8%
-- No positive growth signals → default 4%
+- Cap extreme decline assumptions at -50% so yearly cash flows do not reverse sign from noisy growth data; disclose when this floor applies.
 
 **Rating thresholds:**
 
@@ -340,10 +342,12 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | < 5% | ★ Overvalued |
 
 **Fallback logic for Owner Earnings:**
-1. If D&A + CapEx from cashflow available → full formula
-2. Else if FCF > 0 → FCF used as proxy
-3. Else if NI > 0 → NI used as fallback
-4. If none positive → DCF section shows "insufficient data"
+1. If forecast NI, D&A, and total CapEx from cashflow are available → NI + D&A + total CapEx (CapEx is negative)
+2. Else if trailing FCF > 0 → FCF used as a current-year proxy, even when next-year revenue estimates are unavailable
+3. Else if forecast NI > 0 → NI used as a forward proxy
+4. If no positive owner-earnings proxy is available → DCF section explains which input classes are needed
+
+**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The selected growth rate is held constant through the explicit forecast period as a scenario assumption, not a forecast. When owner earnings starts with forecast year-one NI, growth starts in year 2; when it starts with trailing FCF, growth starts in year 1. Latest-year D&A/total CapEx are paired with forecast net income and working-capital changes are not included. Total CapEx is a proxy for maintenance CapEx, not an estimate of maintenance needs. The displayed starting-growth/discount sensitivity is a model scenario range, not a confidence interval.
 
 **CapEx as % of Revenue / Net Income:** two extra ratios shown alongside the Owner Earnings breakdown (Step 2), answering "how much of the top line / bottom line gets reinvested?" — a different denominator than `capex_intensity_pct` (Owner Earnings command), which divides by `NI + D&A` instead.
 
@@ -356,7 +360,7 @@ CapEx % of Net Income  = abs(capex_cf) / net_income_ttm × 100     [None if net_
 
 Thresholds reuse the existing Capital Intensity bands via the shared `analysis.capex_intensity_color()` helper: green < 25%, yellow 25–50%, red ≥ 50% — same convention as `capex_intensity_pct`, not a new scale.
 
-**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `capex_pct_revenue`, `capex_pct_net_income`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
+**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `capex_pct_revenue`, `capex_pct_net_income`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_base_year`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_pv_owner_earnings`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
 
 ## Earnings Growth Trend (Section 8 of `stocktool valuation`)
 
@@ -386,6 +390,33 @@ Growth is `None` for the oldest period in each list (no prior period available i
 - Growth color: green > 15%, yellow 0–15%, red < 0% — same bands as `analysis._score_growth`
 
 **New fields on `ValuationSnapshot`:** `earnings_quarters` / `earnings_years` (`list[EarningsPeriod]`, newest-first; `EarningsPeriod` = `period, revenue, net_income, margin_pct, growth_pct`), `earnings_margin_trend`, `earnings_simple_note`. Rendered as two tables (Quarterly QoQ, Annual YoY) in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_earnings_trend_card`).
+
+## Institutional Ownership & Flow (Section 9 of `stocktool valuation`)
+
+Appended automatically to every `valuation` panel, right after the Earnings Growth Trend section. Answers "who owns this stock, and are its largest holders buying or selling?"
+
+**Data fetched:** `data.fetch_institutional_ownership()` pulls `ticker.major_holders` (aggregate institutional %/insider %/institution count) and `ticker.institutional_holders` (top-10 holders by position size, each with `pctHeld`, `Value`, and `pctChange` — that holder's most recent quarter-over-quarter position change from their latest 13F filing) — one call per ticker, parallelized like the other `data.py` fetchers. Percent fields are converted from yfinance's raw fractions (×100) at fetch time, matching this project's convention elsewhere (e.g. `implied_volatility`). Never raises; returns `{}` for a ticker on any failure.
+
+**No historical ownership time series exists in yfinance** (free or otherwise) — there is no way to chart aggregate institutional ownership % over time. What *is* available and used here: each top-10 holder's single most-recent quarter-over-quarter change, from their latest 13F filing (filed quarterly, with a standard ~45-day SEC reporting lag — so this is always ~1.5-4.5 months stale, never live). This is a one-quarter snapshot of the largest holders, not a continuous flow signal — stated explicitly in the rendered caveat.
+
+**Computed in `analysis._institutional_flow_signal`:**
+
+```
+Net Institutional Flow  = Σ(holder.pct_change × holder.value) / Σ(holder.value)   [$-weighted average]
+Holders Increasing/Decreasing/Unchanged = counts by sign of holder.pct_change
+```
+
+`None` when there are no top holders, or their total value is zero (nothing to weight by) — never divides by zero.
+
+**Rating ladder (`InstitutionalFlowSignal.label`/`.color`):**
+
+| Net Flow | Label | Color |
+|----------|-------|-------|
+| > +1.0% | NET BUYING | green |
+| -1.0% to +1.0% | MIXED/FLAT | yellow |
+| < -1.0% | NET SELLING | red |
+
+**New fields on `ValuationSnapshot`:** `institutions_pct`, `insiders_pct`, `institutions_count`, `institutional_report_date` (the 13F filing date shared by all top holders), `top_institutional_holders` (`list[dict]` — `holder`, `pct_held`, `value`, `pct_change`), `institutional_flow` (`Optional[InstitutionalFlowSignal]`). Rendered as an ownership-breakdown line + top-holders table + flow verdict in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_institutional_card`).
 
 ## Quick Value Check (`stocktool value`)
 

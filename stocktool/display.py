@@ -654,14 +654,14 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
 
     # ── Intrinsic Value (DCF) ─────────────────────────────────────────────
     lines.append(Text(""))
-    lines.append(Rule(" 7. Intrinsic Value — DCF (Buffett Owner Earnings Method) ", style="bold magenta"))
-    hint("10-year discounted cash flow using Owner Earnings. Estimates fair value per share independent of market price.")
+    lines.append(Rule(" 7. Intrinsic Value — Simplified Owner Earnings DCF ", style="bold magenta"))
+    hint("Simplified 10-year Owner Earnings DCF. The explicit-period growth rate is a scenario assumption, not a forecast.")
     lines.append(Text(""))
 
     if snap.dcf_owner_earnings is not None:
         ni_s = _fmt_large(snap.dcf_net_income) if snap.dcf_net_income else "N/A"
         oe_s = _fmt_large(snap.dcf_owner_earnings)
-        lines.append(Text.assemble(("  Step 1  Normalized Net Income: ", "bold"), (ni_s, "white")))
+        lines.append(Text.assemble(("  Step 1  Forecast Net Income:   ", "bold"), (ni_s, "white")))
 
         lines.append(Text.assemble(
             ("  Step 2  Owner Earnings:        ", "bold"), (oe_s, "cyan"),
@@ -694,7 +694,12 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
             ("  Step 3  Growth Rate:           ", "bold"), (growth_s, "yellow"),
         ))
         if snap.dcf_growth_note:
-            lines.append(Text(f"          ↳ {snap.dcf_growth_note}", style="dim italic"))
+            growth_start_year = snap.dcf_owner_earnings_base_year + 1
+            lines.append(Text(
+                f"          ↳ {snap.dcf_growth_note}; held constant from year "
+                f"{growth_start_year} through year 10 (scenario assumption)",
+                style="dim italic",
+            ))
         lines.append(Text.assemble(
             ("  Step 4  Discount Rate:         ", "bold"),
             (f"{snap.dcf_discount_rate:.0%}", "white"),
@@ -707,7 +712,7 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         ))
         lines.append(Text(""))
 
-        ev_s = _fmt_large(snap.dcf_enterprise_value) if snap.dcf_enterprise_value else "N/A"
+        ev_s = _fmt_large(snap.dcf_pv_owner_earnings) if snap.dcf_pv_owner_earnings else "N/A"
         eq_s = _fmt_large(snap.dcf_equity_value) if snap.dcf_equity_value else "N/A"
         lines.append(Text.assemble(("  Step 6  PV of Owner Earnings:  ", "bold"), (ev_s, "white")))
         lines.append(Text.assemble(
@@ -746,7 +751,7 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         else:
             lines.append(Text("  Steps 8-10: N/A — need shares outstanding for per-share value", style="dim"))
     else:
-        lines.append(Text("  DCF not available — insufficient data (need revenue estimate + profit margin or FCF > 0)", style="dim"))
+        lines.append(Text("  DCF not available — could not establish positive owner earnings (check forward revenue/margin and cash-flow or FCF inputs)", style="dim"))
     lines.append(Text(""))
 
     # ── 8. Earnings Growth Trend ────────────────────────────────────────
@@ -801,6 +806,65 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
             }
             lines.append(Text.assemble(("  Margin Trend: ", "bold"), (snap.earnings_margin_trend, f"bold {mt_color}")))
             hint(mt_hint.get(snap.earnings_margin_trend, ""))
+
+    # ── 9. Institutional Ownership & Flow ───────────────────────────────
+    lines.append(Text(""))
+    lines.append(Rule(" 9. Institutional Ownership & Flow ", style="cyan"))
+    hint("Who owns this stock, and whether its largest holders grew or trimmed their stake last quarter.")
+    lines.append(Text(""))
+
+    if snap.institutions_pct is None and not snap.top_institutional_holders:
+        lines.append(Text("  Not available — yfinance returned no ownership data.", style="dim"))
+    else:
+        if snap.institutions_pct is not None:
+            owner_bits = [f"Institutional: {snap.institutions_pct:.1f}%"]
+            if snap.insiders_pct is not None:
+                owner_bits.append(f"Insider: {snap.insiders_pct:.1f}%")
+            if snap.institutions_count is not None:
+                owner_bits.append(f"{snap.institutions_count:,} institutions")
+            lines.append(Text("  " + "  ·  ".join(owner_bits), style="bold"))
+            lines.append(Text(""))
+
+        if snap.top_institutional_holders:
+            holders_table = Table(
+                title="Top Institutional Holders", show_header=True, header_style="bold",
+                box=None, pad_edge=False, padding=(0, 2),
+            )
+            holders_table.add_column("Holder", style="bold")
+            holders_table.add_column("% Held", justify="right")
+            holders_table.add_column("Value", justify="right")
+            holders_table.add_column("Q/Q Change", justify="right")
+            for h in snap.top_institutional_holders:
+                change = h.get("pct_change")
+                change_color = "green" if change and change > 0 else ("red" if change and change < 0 else "dim")
+                change_str = f"{change:+.2f}%" if change is not None else "—"
+                holders_table.add_row(
+                    h.get("holder", "—"),
+                    f"{h['pct_held']:.2f}%" if h.get("pct_held") is not None else "—",
+                    _fmt_large(h.get("value")),
+                    Text(change_str, style=change_color),
+                )
+            lines.append(holders_table)
+            if snap.institutional_report_date:
+                lines.append(Text(f"  As of {snap.institutional_report_date} (most recent 13F filings)", style="dim"))
+            lines.append(Text(""))
+
+        if snap.institutional_flow is not None:
+            flow = snap.institutional_flow
+            lines.append(Text.assemble(
+                ("  Net Institutional Flow (top holders, $-weighted): ", "bold"),
+                (f"{flow.net_flow_pct:+.2f}% → {flow.label}", f"bold {flow.color}"),
+            ))
+            lines.append(Text(
+                f"  {flow.holders_increasing} of {len(snap.top_institutional_holders)} top holders increased their "
+                f"stake, {flow.holders_decreasing} decreased, {flow.holders_unchanged} unchanged",
+                style="dim",
+            ))
+            hint(
+                "Based on the top 10 institutional holders' most recent 13F filings (quarterly, "
+                "~45-day reporting lag) — not the full institutional base, and not a continuous "
+                "time series."
+            )
 
     console.print(Panel(
         Group(*lines),

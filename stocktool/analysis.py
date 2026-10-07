@@ -122,15 +122,16 @@ class ValuationSnapshot:
     capex_pct_revenue: Optional[float] = None    # abs(capex_cf) / total_revenue * 100
     capex_pct_net_income: Optional[float] = None # abs(capex_cf) / net_income * 100 (None if net_income <= 0)
     # DCF intrinsic value (10-step methodology)
-    dcf_net_income: Optional[float] = None       # step 1 normalized NI
+    dcf_net_income: Optional[float] = None       # step 1 forecast NI estimate
     dcf_owner_earnings: Optional[float] = None   # step 2
+    dcf_owner_earnings_base_year: int = 0
     dcf_owner_earnings_note: Optional[str] = None
     dcf_data_note: Optional[str] = None
     dcf_growth_rate: Optional[float] = None      # step 3
     dcf_growth_note: Optional[str] = None
     dcf_discount_rate: float = 0.10              # step 4
     dcf_terminal_growth: float = 0.025           # step 5
-    dcf_enterprise_value: Optional[float] = None # step 6
+    dcf_pv_owner_earnings: Optional[float] = None # step 6
     dcf_equity_value: Optional[float] = None     # step 7
     intrinsic_value_per_share: Optional[float] = None  # step 8
     intrinsic_value_low: Optional[float] = None
@@ -143,6 +144,13 @@ class ValuationSnapshot:
     earnings_years: list[EarningsPeriod] = field(default_factory=list)     # newest first
     earnings_margin_trend: Optional[str] = None   # "EXPANDING" / "STABLE" / "COMPRESSING"
     earnings_simple_note: Optional[str] = None    # e.g. "For every $10 in revenue, keeps $2.70 (27%)"
+    # Institutional Ownership & Flow (Section 9)
+    institutions_pct: Optional[float] = None       # % of shares held by institutions
+    insiders_pct: Optional[float] = None           # % of shares held by insiders
+    institutions_count: Optional[int] = None
+    institutional_report_date: Optional[str] = None  # most recent 13F filing date, shared by top_holders
+    top_institutional_holders: list[dict] = field(default_factory=list)  # [{holder, pct_held, value, pct_change}]
+    institutional_flow: Optional["InstitutionalFlowSignal"] = None
 
 
 def pe_category(pe: Optional[float]) -> tuple[str, str]:
@@ -199,17 +207,17 @@ def _select_dcf_growth_rate(
     """Choose a conservative DCF growth rate. Returns (rate, explanation)."""
     candidates = []
     parts = []
-    if revenue_growth is not None and revenue_growth > 0:
+    if revenue_growth is not None:
         candidates.append(revenue_growth)
-        parts.append(f"rev +{revenue_growth:.1%}")
-    if eps_growth is not None and eps_growth > 0:
+        parts.append(f"rev {revenue_growth:+.1%}")
+    if eps_growth is not None:
         candidates.append(eps_growth)
-        parts.append(f"EPS +{eps_growth:.1%}")
+        parts.append(f"EPS {eps_growth:+.1%}")
 
-    quality = roe or roa or 0.0
+    quality = roe if roe is not None else (roa if roa is not None else 0.0)
 
     if not candidates:
-        return 0.04, "No positive growth signals found; conservative 4% default assumed"
+        return 0.0, "Growth data unavailable; no-growth assumption used"
 
     avg = sum(candidates) / len(candidates)
 
@@ -221,8 +229,11 @@ def _select_dcf_growth_rate(
     else:
         cap, tier = 0.08, "mature/average business"
 
-    rate = min(avg, cap)
-    note = f"Avg of {', '.join(parts)}, capped at {cap:.0%} for {tier}"
+    # Prevent noisy yfinance growth rates from creating negative projected cash flows
+    # through a one-period collapse or implausibly extreme positive compounding.
+    rate = max(-0.50, min(avg, cap))
+    floor_note = "; floored at -50%" if avg < -0.50 else ""
+    note = f"Avg of {', '.join(parts)}, capped at {cap:.0%} for {tier}{floor_note}"
     return rate, note
 
 
@@ -232,13 +243,25 @@ def _run_dcf(
     discount_rate: float = 0.10,
     terminal_growth: float = 0.025,
     n_years: int = 10,
+    base_year: int = 0,
 ) -> tuple[float, float]:
-    """Return (pv_of_projected_earnings, pv_of_terminal_value)."""
+    """Return (PV of explicit cash flows, PV of terminal value).
+
+    `base_year=0` means owner_earnings is the current-year baseline, so year 1 grows
+    once. `base_year=1` means it is already a year-1 estimate, so year 1 is discounted
+    without applying another year of growth. The selected rate is held constant through
+    the explicit forecast period; it is a scenario assumption, not a forecast.
+    """
+    if discount_rate <= terminal_growth:
+        raise ValueError("discount_rate must exceed terminal_growth")
+
+    if base_year not in (0, 1):
+        raise ValueError("base_year must be 0 or 1")
     pv_oe = sum(
-        owner_earnings * (1 + growth_rate) ** t / (1 + discount_rate) ** t
-        for t in range(1, n_years + 1)
+        owner_earnings * (1 + growth_rate) ** (year - base_year) / (1 + discount_rate) ** year
+        for year in range(1, n_years + 1)
     )
-    oe_year_n = owner_earnings * (1 + growth_rate) ** n_years
+    oe_year_n = owner_earnings * (1 + growth_rate) ** (n_years - base_year)
     terminal_value = oe_year_n * (1 + terminal_growth) / (discount_rate - terminal_growth)
     pv_tv = terminal_value / (1 + discount_rate) ** n_years
     return pv_oe, pv_tv
@@ -351,6 +374,46 @@ def _earnings_simple_note(ticker: str, latest: Optional[EarningsPeriod]) -> Opti
     )
 
 
+@dataclass
+class InstitutionalFlowSignal:
+    net_flow_pct: float
+    holders_increasing: int
+    holders_decreasing: int
+    holders_unchanged: int
+    label: str
+    color: str
+
+
+def _institutional_flow_signal(top_holders: list[dict]) -> Optional["InstitutionalFlowSignal"]:
+    """Dollar-weighted average of the top holders' most recent quarter-over-quarter position
+    change (`pct_change`, already in percent), plus a simple increasing/decreasing/unchanged
+    count. `None` if there are no holders or their total value is zero (nothing to weight by).
+    """
+    if not top_holders:
+        return None
+    total_value = sum(h["value"] for h in top_holders)
+    if not total_value:
+        return None
+    net_flow_pct = sum(h["pct_change"] * h["value"] for h in top_holders) / total_value
+    increasing = sum(1 for h in top_holders if h["pct_change"] > 0)
+    decreasing = sum(1 for h in top_holders if h["pct_change"] < 0)
+    unchanged = len(top_holders) - increasing - decreasing
+    if net_flow_pct > 1.0:
+        label, color = "NET BUYING", "green"
+    elif net_flow_pct < -1.0:
+        label, color = "NET SELLING", "red"
+    else:
+        label, color = "MIXED/FLAT", "yellow"
+    return InstitutionalFlowSignal(
+        net_flow_pct=net_flow_pct,
+        holders_increasing=increasing,
+        holders_decreasing=decreasing,
+        holders_unchanged=unchanged,
+        label=label,
+        color=color,
+    )
+
+
 def build_valuation_snapshot(
     ticker: str,
     info: dict,
@@ -360,9 +423,11 @@ def build_valuation_snapshot(
     cf_data: Optional[dict] = None,
     sma_200: Optional[float] = None,
     earnings_data: Optional[dict] = None,
+    institutional_data: Optional[dict] = None,
 ) -> "ValuationSnapshot":
     """Build a ValuationSnapshot with projected future market cap, return, and DCF intrinsic value."""
     bs_data = bs_data or {}
+    institutional_data = institutional_data or {}
     eps = _safe_float(info.get("trailingEps"))
     current_price = _safe_float(info.get("currentPrice"))
     current_price_from_history = False
@@ -481,22 +546,25 @@ def build_valuation_snapshot(
     discount_rate = 0.10
     terminal_growth = 0.025
 
-    # Step 1: Normalized Net Income
+    # Step 1: Forecast net income from next-year revenue and current margin.
     dcf_net_income: Optional[float] = None
     if next_year_revenue and profit_margin:
         dcf_net_income = next_year_revenue * profit_margin
 
-    # Step 2: Owner Earnings = NI + Dep - Maintenance CapEx
+    # Step 2: Owner Earnings. The complete formula uses forecast NI with latest
+    # reported D&A and total CapEx; this is a disclosed proxy, not maintenance CapEx.
     dcf_owner_earnings: Optional[float] = None
+    dcf_owner_earnings_base_year = 1 if dcf_net_income is not None else 0
     dcf_owner_earnings_note: Optional[str] = None
     dcf_data_note: Optional[str] = None
     if dcf_net_income is not None and depreciation is not None and capex_cf is not None:
         dcf_owner_earnings = dcf_net_income + depreciation + capex_cf  # capex_cf already negative
         dcf_owner_earnings_note = "NI + D&A + CapEx (latest year; CapEx is total, not maintenance-only)"
         dcf_data_note = "Working-capital changes are not included; latest reported D&A/CapEx are paired with forecast net income."
-    elif dcf_net_income is not None and free_cashflow is not None and free_cashflow > 0:
-        # FCF ≈ NI + D&A - CapEx, so use it as proxy when D&A/CapEx unavailable
+    elif free_cashflow is not None and free_cashflow > 0:
+        # FCF is a current trailing baseline, so project its first growth step in year 1.
         dcf_owner_earnings = free_cashflow
+        dcf_owner_earnings_base_year = 0
         dcf_owner_earnings_note = "Free Cash Flow proxy used (D&A/CapEx unavailable)"
         dcf_data_note = "FCF is a proxy for owner earnings; working-capital treatment may differ from the full formula."
     elif dcf_net_income is not None and dcf_net_income > 0:
@@ -507,7 +575,7 @@ def build_valuation_snapshot(
     # Steps 3-10
     dcf_growth_rate: Optional[float] = None
     dcf_growth_note: Optional[str] = None
-    dcf_enterprise_value: Optional[float] = None
+    dcf_pv_owner_earnings: Optional[float] = None
     dcf_equity_value: Optional[float] = None
     intrinsic_value_per_share: Optional[float] = None
     intrinsic_value_low: Optional[float] = None
@@ -518,24 +586,33 @@ def build_valuation_snapshot(
 
     if dcf_owner_earnings is not None and dcf_owner_earnings > 0:
         dcf_growth_rate, dcf_growth_note = _select_dcf_growth_rate(revenue_growth, eps_growth, roe, roa)
-        pv_oe, pv_tv = _run_dcf(dcf_owner_earnings, dcf_growth_rate, discount_rate, terminal_growth)
-        dcf_enterprise_value = pv_oe + pv_tv
+        pv_oe, pv_tv = _run_dcf(
+            dcf_owner_earnings, dcf_growth_rate, discount_rate, terminal_growth,
+            base_year=dcf_owner_earnings_base_year,
+        )
+        dcf_pv_owner_earnings = pv_oe + pv_tv
         # Owner Earnings starts from net income, an equity cash-flow basis. Do not
         # add cash or subtract debt, which would mix equity and enterprise methods.
-        dcf_equity_value = dcf_enterprise_value
+        dcf_equity_value = dcf_pv_owner_earnings
         # Step 8: per-share
         if shares_outstanding and shares_outstanding > 0:
             intrinsic_value_per_share = dcf_equity_value / shares_outstanding
             # Sensitivity envelope: lower growth/higher discount vs. higher growth/lower
             # discount. It is a model range, not a confidence interval.
-            low_growth = max(0.0, dcf_growth_rate - 0.02)
+            low_growth = max(-0.50, dcf_growth_rate - 0.02)
             high_growth = min(0.20, dcf_growth_rate + 0.02)
-            low_pv = sum(dcf_owner_earnings * (1 + low_growth) ** year / 1.12 ** year for year in range(1, 11))
-            low_terminal = dcf_owner_earnings * (1 + low_growth) ** 10 * (1 + terminal_growth) / (0.12 - terminal_growth) / 1.12 ** 10
-            high_pv = sum(dcf_owner_earnings * (1 + high_growth) ** year / 1.08 ** year for year in range(1, 11))
-            high_terminal = dcf_owner_earnings * (1 + high_growth) ** 10 * (1 + terminal_growth) / (0.08 - terminal_growth) / 1.08 ** 10
-            intrinsic_value_low = (low_pv + low_terminal) / shares_outstanding
-            intrinsic_value_high = (high_pv + high_terminal) / shares_outstanding
+            low_pv, low_terminal = _run_dcf(
+                dcf_owner_earnings, low_growth, 0.12, terminal_growth,
+                base_year=dcf_owner_earnings_base_year,
+            )
+            high_pv, high_terminal = _run_dcf(
+                dcf_owner_earnings, high_growth, 0.08, terminal_growth,
+                base_year=dcf_owner_earnings_base_year,
+            )
+            low_scenario_value = (low_pv + low_terminal) / shares_outstanding
+            high_scenario_value = (high_pv + high_terminal) / shares_outstanding
+            intrinsic_value_low = min(low_scenario_value, high_scenario_value)
+            intrinsic_value_high = max(low_scenario_value, high_scenario_value)
         # Step 9 & 10
         if intrinsic_value_per_share and current_price and intrinsic_value_per_share > 0:
             margin_of_safety_pct = (intrinsic_value_per_share - current_price) / intrinsic_value_per_share * 100
@@ -569,6 +646,9 @@ def build_valuation_snapshot(
     earnings_simple_note = _earnings_simple_note(
         ticker, earnings_years[0] if earnings_years else (earnings_quarters[0] if earnings_quarters else None)
     )
+
+    top_institutional_holders = institutional_data.get("top_holders", [])
+    institutional_flow = _institutional_flow_signal(top_institutional_holders)
 
     return ValuationSnapshot(
         ticker=ticker,
@@ -615,13 +695,14 @@ def build_valuation_snapshot(
         capex_pct_net_income=capex_pct_net_income,
         dcf_net_income=dcf_net_income,
         dcf_owner_earnings=dcf_owner_earnings,
+        dcf_owner_earnings_base_year=dcf_owner_earnings_base_year,
         dcf_owner_earnings_note=dcf_owner_earnings_note,
         dcf_data_note=dcf_data_note,
         dcf_growth_rate=dcf_growth_rate,
         dcf_growth_note=dcf_growth_note,
         dcf_discount_rate=discount_rate,
         dcf_terminal_growth=terminal_growth,
-        dcf_enterprise_value=dcf_enterprise_value,
+        dcf_pv_owner_earnings=dcf_pv_owner_earnings,
         dcf_equity_value=dcf_equity_value,
         intrinsic_value_per_share=intrinsic_value_per_share,
         intrinsic_value_low=intrinsic_value_low,
@@ -633,6 +714,12 @@ def build_valuation_snapshot(
         earnings_years=earnings_years,
         earnings_margin_trend=earnings_margin_trend,
         earnings_simple_note=earnings_simple_note,
+        institutions_pct=institutional_data.get("institutions_pct"),
+        insiders_pct=institutional_data.get("insiders_pct"),
+        institutions_count=institutional_data.get("institutions_count"),
+        institutional_report_date=institutional_data.get("report_date"),
+        top_institutional_holders=top_institutional_holders,
+        institutional_flow=institutional_flow,
     )
 
 

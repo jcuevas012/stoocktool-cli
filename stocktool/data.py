@@ -157,6 +157,56 @@ def fetch_cashflow_basics(tickers: list[str]) -> dict[str, dict]:
     return results
 
 
+def fetch_institutional_ownership(tickers: list[str]) -> dict[str, dict]:
+    """Fetch institutional/insider ownership breakdown and the top-10 institutional holders
+    (each with their most recent quarter-over-quarter position change) for each ticker.
+
+    Returns {ticker: {"institutions_pct", "insiders_pct", "institutions_count", "report_date",
+    "top_holders": [{"holder", "pct_held", "value", "pct_change"}, ...]}} — percent fields are
+    already converted from yfinance's raw fractions (×100), matching this project's convention
+    elsewhere (e.g. implied_volatility). Missing/unavailable data yields {} for that ticker;
+    never raises.
+    """
+    results: dict[str, dict] = {}
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        out: dict = {}
+        try:
+            t = yf.Ticker(ticker)
+            major = t.major_holders
+            if major is not None and not major.empty:
+                if "institutionsPercentHeld" in major.index:
+                    out["institutions_pct"] = float(major.loc["institutionsPercentHeld", "Value"]) * 100
+                if "insidersPercentHeld" in major.index:
+                    out["insiders_pct"] = float(major.loc["insidersPercentHeld", "Value"]) * 100
+                if "institutionsCount" in major.index:
+                    out["institutions_count"] = int(major.loc["institutionsCount", "Value"])
+
+            holders = t.institutional_holders
+            if holders is not None and not holders.empty:
+                out["report_date"] = str(holders.iloc[0]["Date Reported"].date())
+                out["top_holders"] = [
+                    {
+                        "holder": str(row["Holder"]),
+                        "pct_held": float(row["pctHeld"]) * 100,
+                        "value": float(row["Value"]),
+                        "pct_change": float(row["pctChange"]) * 100,
+                    }
+                    for _, row in holders.iterrows()
+                ]
+        except Exception:
+            return ticker, {}
+        return ticker, out
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, out = future.result()
+            results[ticker] = out
+
+    return results
+
+
 def fetch_earnings_history(tickers: list[str]) -> dict[str, dict]:
     """Fetch quarterly and annual Revenue/Net Income for earnings-trend analysis.
 
