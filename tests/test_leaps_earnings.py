@@ -11,6 +11,10 @@ from stocktool.leaps import LeapsPosition
 
 class FetchEarningsMoveHistoryTests(unittest.TestCase):
     def test_computes_pct_move_around_each_earnings_date(self):
+        # earnings_date lands on a trading day in this fixture (2026-06-29, a Monday) — the
+        # window must land strictly after it, not on the earnings day itself, since a
+        # before-market report's reaction is already priced in by that day's close while an
+        # after-market report's reaction isn't reflected until the day after.
         today = date.today()
         earnings_date = today - timedelta(days=100)
         earnings_df = pd.DataFrame(
@@ -19,8 +23,9 @@ class FetchEarningsMoveHistoryTests(unittest.TestCase):
         trading_days = pd.bdate_range(end=pd.Timestamp(today), periods=400)
         closes = pd.Series(100.0, index=trading_days)
         before_idx = trading_days.searchsorted(pd.Timestamp(earnings_date)) - 1
+        after_idx = next(i for i, d in enumerate(trading_days) if d > pd.Timestamp(earnings_date))
         closes.iloc[before_idx] = 100.0
-        closes.iloc[before_idx + 1] = 110.0
+        closes.iloc[after_idx] = 110.0
         hist_df = pd.DataFrame({"Close": closes})
 
         ticker = Mock()

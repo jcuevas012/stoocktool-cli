@@ -1353,7 +1353,7 @@ def leaps_show(
         position, gamma_iv, gamma_iv_source
     )
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
-    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position)
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position, current_iv=gamma_iv)
     display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
     earnings_info = data.fetch_next_earnings_date(position.ticker) if position.status == "ACTIVE" else {}
     earnings_moves = data.fetch_earnings_move_history(position.ticker) if position.status == "ACTIVE" else []
@@ -1486,7 +1486,7 @@ def leaps_update(
         position, gamma_iv, gamma_iv_source
     )
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
-    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position)
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position, current_iv=gamma_iv)
     display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
     earnings_info = data.fetch_next_earnings_date(position.ticker) if position.status == "ACTIVE" else {}
     earnings_moves = data.fetch_earnings_move_history(position.ticker) if position.status == "ACTIVE" else []

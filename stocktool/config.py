@@ -60,9 +60,8 @@ LEAPS_DECAY_ACCELERATION_FRACTION = 1 / 3
 # you're paying a volatility premium above realized movement.
 LEAPS_IV_CHEAP_RATIO = 0.90
 LEAPS_IV_EXPENSIVE_RATIO = 1.15
-# IV Rank: percentile of current IV against this position's own tracked iv_history (not a
-# true 52-week range — yfinance has no historical-IV series, so this is only what the tool
-# has actually recorded since the user started tracking this position).
+# IV Rank: current IV's position within this position's tracked min/max IV range (not an
+# empirical percentile or true 52-week range — yfinance has no historical-IV series).
 LEAPS_IV_RANK_MIN_READINGS = 5
 LEAPS_IV_RANK_CHEAP_MAX = 30
 LEAPS_IV_RANK_NORMAL_MAX = 60

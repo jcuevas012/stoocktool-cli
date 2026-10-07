@@ -2220,7 +2220,7 @@ def _leaps_iv_rank_line(snapshot: LeapsSnapshot) -> str:
             )
         return "  IV Rank: unavailable — no current IV reading to rank"
     return (
-        f"  IV Rank: [{snapshot.iv_rank_color}]{snapshot.iv_rank_pct:.0f}th percentile — "
+        f"  IV Rank: [{snapshot.iv_rank_color}]{snapshot.iv_rank_pct:.0f}% of tracked range — "
         f"{snapshot.iv_rank_label}[/{snapshot.iv_rank_color}] "
         f"(range {snapshot.iv_range_low:.1f}%-{snapshot.iv_range_high:.1f}% over "
         f"{snapshot.iv_rank_reading_count} tracked readings)"
@@ -2523,7 +2523,7 @@ def render_leaps_earnings_context(context: Optional[LeapsEarningsContext]) -> No
         lines.append("Next earnings: unavailable")
     if context.avg_abs_move_pct is not None:
         lines.append(
-            f"Historical post-earnings move: avg ±{context.avg_abs_move_pct:.1f}% over last "
+            f"Historical earnings-window move: avg ±{context.avg_abs_move_pct:.1f}% over last "
             f"{context.quarters_used} quarters · max ±{context.max_abs_move_pct:.1f}%"
         )
         if context.delta_impact_avg is not None:
@@ -2537,8 +2537,9 @@ def render_leaps_earnings_context(context: Optional[LeapsEarningsContext]) -> No
                 f"down → {-context.delta_impact_max:+,.0f}"
             )
         lines.append(
-            "[dim]Delta-only estimate — earnings often also moves IV sharply (usually down after "
-            "the report), and this tool has no reliable estimate of that IV change.[/dim]"
+            "[dim]Close-to-close window: prior trading close to first close after the report date. "
+            "Release timing is unavailable, so before-market reports may include an extra session. "
+            "Delta-only estimate; IV change is not estimated.[/dim]"
         )
     else:
         lines.append(f"[dim]No earnings-move history available ({context.quarters_used} quarters found).[/dim]")

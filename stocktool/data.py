@@ -884,10 +884,11 @@ def fetch_next_earnings_date(ticker: str) -> dict:
 
 
 def fetch_earnings_move_history(ticker: str, quarters: int = LEAPS_EARNINGS_HISTORY_QUARTERS) -> list[dict]:
-    """Best-effort historical price move bracketing each of the last `quarters` earnings
-    reports: the close on the last trading day strictly before the earnings date, versus the
-    close on the first trading day on/after it (this is the closest honest bracket available —
-    yfinance's earnings-date timestamps don't reliably say before-market vs. after-market).
+    """Best-effort earnings-window move for each of the last `quarters` reports: compare
+    the close on the last trading day strictly before the report date with the first close
+    strictly after it. This includes a possible after-hours reaction. It may also include
+    an extra session for before-market reports because yfinance timestamps do not reliably
+    distinguish release timing; this is an event window, not a pure one-day earnings return.
 
     Returns a list of {"date": iso, "pct_move": signed %, "abs_pct_move": %}, newest last.
     Never raises — returns [] on any failure (missing data, network error, too-short history).
@@ -920,10 +921,14 @@ def fetch_earnings_move_history(ticker: str, quarters: int = LEAPS_EARNINGS_HIST
                     prior_idx = i
                 else:
                     break
-            if prior_idx is None or prior_idx + 1 >= len(trading_days):
+            after_idx = next(
+                (i for i, trading_day in enumerate(trading_days) if trading_day > earnings_date),
+                None,
+            )
+            if prior_idx is None or after_idx is None:
                 continue
             prior_close = float(closes.iloc[prior_idx])
-            next_close = float(closes.iloc[prior_idx + 1])
+            next_close = float(closes.iloc[after_idx])
             if prior_close <= 0:
                 continue
             pct_move = (next_close - prior_close) / prior_close * 100

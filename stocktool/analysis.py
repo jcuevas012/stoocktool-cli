@@ -1487,7 +1487,8 @@ class LeapsVegaImpact:
 
 
 def build_leaps_vega_impact(
-    curve: Optional["LeapsGammaCurve"], position: LeapsPosition
+    curve: Optional["LeapsGammaCurve"], position: LeapsPosition,
+    current_iv: Optional[float] = None,
 ) -> Optional[LeapsVegaImpact]:
     """Dollar impact of IV moves, using today's model vega as a constant approximation across
     the whole move since entry (vega itself drifts with price, time, and IV level).
@@ -1499,8 +1500,13 @@ def build_leaps_vega_impact(
         return None
     vega_total = curve.vega * position.contracts
     entry_iv = position.entry_iv
-    current_iv_is_fallback = position.current_iv is None and entry_iv is not None
-    current_iv = position.current_iv if position.current_iv is not None else entry_iv
+    # The caller passes this run's live market IV when available. `None` means no
+    # live reading was fetched, so fall back to the explicitly saved current IV.
+    current_iv_is_fallback = current_iv is None and position.current_iv is None and entry_iv is not None
+    current_iv = current_iv if current_iv is not None else position.current_iv
+    if current_iv is None:
+        current_iv = entry_iv
+        current_iv_is_fallback = entry_iv is not None
     iv_change_pts = None
     vega_pnl_since_entry = None
     if entry_iv is not None and current_iv is not None:
@@ -1702,7 +1708,7 @@ class LeapsIvRank:
 
 
 def leaps_iv_rank(current_iv: Optional[float], iv_history: list) -> Optional[LeapsIvRank]:
-    """IV percentile against this position's own accumulated history. Boundaries are
+    """IV range rank against this position's own accumulated history. Boundaries are
     inclusive on the lower bucket (exactly 30.0 is CHEAP, exactly 60.0 is NORMAL, etc.)."""
     from .config import (
         LEAPS_IV_RANK_MIN_READINGS, LEAPS_IV_RANK_CHEAP_MAX,
@@ -2118,7 +2124,7 @@ def build_leaps_scenario(
     if position.entry_iv is not None:
         warnings.append(
             f"IV at entry: {position.entry_iv:.1f}% — this tool tracks IV Rank over time via "
-            "`leaps show`/`leaps update`; check there for the current percentile against this "
+            "`leaps show`/`leaps update`; check there for the current position in this "
             "position's own history."
         )
     warnings.append(
