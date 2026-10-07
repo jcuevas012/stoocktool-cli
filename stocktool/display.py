@@ -10,9 +10,10 @@ from rich.text import Text
 from .analysis import (
     FundamentalSnapshot, ValuationSnapshot, ValueCheckSnapshot,
     CashSecuredPutSnapshot, OwnerEarningsSnapshot, ETFValuationSnapshot,
-    LeapsSnapshot, LeapsScenario, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
+    LeapsSnapshot, LeapsScenario, LeapsGammaCurve, LeapsVegaImpact, LeapsEarningsContext, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
-    leaps_leverage_color, leaps_exposure_color, leaps_decay_color,
+    leaps_leverage_color, leaps_exposure_color, leaps_decay_color, leaps_iv_value_verdict,
+    leaps_liquidity_rating,
 )
 from .leaps import LeapsPosition
 from .portfolio import PortfolioSnapshot
@@ -653,14 +654,14 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
 
     # ── Intrinsic Value (DCF) ─────────────────────────────────────────────
     lines.append(Text(""))
-    lines.append(Rule(" 7. Intrinsic Value — DCF (Buffett Owner Earnings Method) ", style="bold magenta"))
-    hint("10-year discounted cash flow using Owner Earnings. Estimates fair value per share independent of market price.")
+    lines.append(Rule(" 7. Intrinsic Value — Simplified Owner Earnings DCF ", style="bold magenta"))
+    hint("Simplified 10-year Owner Earnings DCF. The explicit-period growth rate is a scenario assumption, not a forecast.")
     lines.append(Text(""))
 
     if snap.dcf_owner_earnings is not None:
         ni_s = _fmt_large(snap.dcf_net_income) if snap.dcf_net_income else "N/A"
         oe_s = _fmt_large(snap.dcf_owner_earnings)
-        lines.append(Text.assemble(("  Step 1  Normalized Net Income: ", "bold"), (ni_s, "white")))
+        lines.append(Text.assemble(("  Step 1  Forecast Net Income:   ", "bold"), (ni_s, "white")))
 
         lines.append(Text.assemble(
             ("  Step 2  Owner Earnings:        ", "bold"), (oe_s, "cyan"),
@@ -693,7 +694,12 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
             ("  Step 3  Growth Rate:           ", "bold"), (growth_s, "yellow"),
         ))
         if snap.dcf_growth_note:
-            lines.append(Text(f"          ↳ {snap.dcf_growth_note}", style="dim italic"))
+            growth_start_year = snap.dcf_owner_earnings_base_year + 1
+            lines.append(Text(
+                f"          ↳ {snap.dcf_growth_note}; held constant from year "
+                f"{growth_start_year} through year 10 (scenario assumption)",
+                style="dim italic",
+            ))
         lines.append(Text.assemble(
             ("  Step 4  Discount Rate:         ", "bold"),
             (f"{snap.dcf_discount_rate:.0%}", "white"),
@@ -706,7 +712,7 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         ))
         lines.append(Text(""))
 
-        ev_s = _fmt_large(snap.dcf_enterprise_value) if snap.dcf_enterprise_value else "N/A"
+        ev_s = _fmt_large(snap.dcf_pv_owner_earnings) if snap.dcf_pv_owner_earnings else "N/A"
         eq_s = _fmt_large(snap.dcf_equity_value) if snap.dcf_equity_value else "N/A"
         lines.append(Text.assemble(("  Step 6  PV of Owner Earnings:  ", "bold"), (ev_s, "white")))
         lines.append(Text.assemble(
@@ -745,7 +751,7 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
         else:
             lines.append(Text("  Steps 8-10: N/A — need shares outstanding for per-share value", style="dim"))
     else:
-        lines.append(Text("  DCF not available — insufficient data (need revenue estimate + profit margin or FCF > 0)", style="dim"))
+        lines.append(Text("  DCF not available — could not establish positive owner earnings (check forward revenue/margin and cash-flow or FCF inputs)", style="dim"))
     lines.append(Text(""))
 
     # ── 8. Earnings Growth Trend ────────────────────────────────────────
@@ -800,6 +806,65 @@ def _render_one_valuation(snap: ValuationSnapshot) -> None:
             }
             lines.append(Text.assemble(("  Margin Trend: ", "bold"), (snap.earnings_margin_trend, f"bold {mt_color}")))
             hint(mt_hint.get(snap.earnings_margin_trend, ""))
+
+    # ── 9. Institutional Ownership & Flow ───────────────────────────────
+    lines.append(Text(""))
+    lines.append(Rule(" 9. Institutional Ownership & Flow ", style="cyan"))
+    hint("Who owns this stock, and whether its largest holders grew or trimmed their stake last quarter.")
+    lines.append(Text(""))
+
+    if snap.institutions_pct is None and not snap.top_institutional_holders:
+        lines.append(Text("  Not available — yfinance returned no ownership data.", style="dim"))
+    else:
+        if snap.institutions_pct is not None:
+            owner_bits = [f"Institutional: {snap.institutions_pct:.1f}%"]
+            if snap.insiders_pct is not None:
+                owner_bits.append(f"Insider: {snap.insiders_pct:.1f}%")
+            if snap.institutions_count is not None:
+                owner_bits.append(f"{snap.institutions_count:,} institutions")
+            lines.append(Text("  " + "  ·  ".join(owner_bits), style="bold"))
+            lines.append(Text(""))
+
+        if snap.top_institutional_holders:
+            holders_table = Table(
+                title="Top Institutional Holders", show_header=True, header_style="bold",
+                box=None, pad_edge=False, padding=(0, 2),
+            )
+            holders_table.add_column("Holder", style="bold")
+            holders_table.add_column("% Held", justify="right")
+            holders_table.add_column("Value", justify="right")
+            holders_table.add_column("Q/Q Change", justify="right")
+            for h in snap.top_institutional_holders:
+                change = h.get("pct_change")
+                change_color = "green" if change and change > 0 else ("red" if change and change < 0 else "dim")
+                change_str = f"{change:+.2f}%" if change is not None else "—"
+                holders_table.add_row(
+                    h.get("holder", "—"),
+                    f"{h['pct_held']:.2f}%" if h.get("pct_held") is not None else "—",
+                    _fmt_large(h.get("value")),
+                    Text(change_str, style=change_color),
+                )
+            lines.append(holders_table)
+            if snap.institutional_report_date:
+                lines.append(Text(f"  As of {snap.institutional_report_date} (most recent 13F filings)", style="dim"))
+            lines.append(Text(""))
+
+        if snap.institutional_flow is not None:
+            flow = snap.institutional_flow
+            lines.append(Text.assemble(
+                ("  Net Institutional Flow (top holders, $-weighted): ", "bold"),
+                (f"{flow.net_flow_pct:+.2f}% → {flow.label}", f"bold {flow.color}"),
+            ))
+            lines.append(Text(
+                f"  {flow.holders_increasing} of {len(snap.top_institutional_holders)} top holders increased their "
+                f"stake, {flow.holders_decreasing} decreased, {flow.holders_unchanged} unchanged",
+                style="dim",
+            ))
+            hint(
+                "Based on the top 10 institutional holders' most recent 13F filings (quarterly, "
+                "~45-day reporting lag) — not the full institutional base, and not a continuous "
+                "time series."
+            )
 
     console.print(Panel(
         Group(*lines),
@@ -2184,21 +2249,85 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
     ))
 
 
-def _leaps_iv_history_lines(position: LeapsPosition) -> list[str]:
+def _leaps_current_iv_line(position: LeapsPosition, snapshot: LeapsSnapshot) -> str:
+    """Current IV line, tagged with the CHEAP/FAIR/EXPENSIVE signal when available."""
+    if position.current_iv is None:
+        return "  Current IV: N/A"
+    line = f"  Current IV: {position.current_iv:.1f}%"
+    if snapshot.iv_value_label is not None:
+        line += (
+            f" → [{snapshot.iv_value_color}]{snapshot.iv_value_label}[/{snapshot.iv_value_color}]"
+            f" ({snapshot.iv_value_ratio:.2f}x vs {snapshot.realized_volatility:.1f}% realized)"
+        )
+    return line
+
+
+def _leaps_iv_rank_line(snapshot: LeapsSnapshot) -> str:
+    """IV Rank against this position's own tracked history (not a true 52-week range).
+
+    The None-label case has several distinct causes that shouldn't collapse into one
+    message: a closed position (rank is never computed for these), no readings tracked at
+    all, fewer than the configured minimum, or enough readings but no current IV value to
+    rank against them.
+    """
+    if snapshot.iv_rank_label is None:
+        if snapshot.status != "ACTIVE":
+            return "  IV Rank: not computed for closed positions"
+        if snapshot.iv_rank_reading_count == 0:
+            return "  IV Rank: no IV readings tracked yet — run `leaps show`/`leaps update` to start"
+        from .config import LEAPS_IV_RANK_MIN_READINGS
+        if snapshot.iv_rank_reading_count < LEAPS_IV_RANK_MIN_READINGS:
+            return (
+                f"  IV Rank: not enough history yet ({snapshot.iv_rank_reading_count}/"
+                f"{LEAPS_IV_RANK_MIN_READINGS} readings) — keep running `leaps show`/`leaps update` "
+                "to build this up"
+            )
+        return "  IV Rank: unavailable — no current IV reading to rank"
+    return (
+        f"  IV Rank: [{snapshot.iv_rank_color}]{snapshot.iv_rank_pct:.0f}% of tracked range — "
+        f"{snapshot.iv_rank_label}[/{snapshot.iv_rank_color}] "
+        f"(range {snapshot.iv_range_low:.1f}%-{snapshot.iv_range_high:.1f}% over "
+        f"{snapshot.iv_rank_reading_count} tracked readings)"
+    )
+
+
+def _leaps_iv_history_lines(position: LeapsPosition, snapshot: LeapsSnapshot) -> list[str]:
     """Lines for the IV History block: one reading per `leaps add`/`leaps update` run so far.
 
     yfinance has no historical-IV endpoint, so this can't show the past before the position
     was opened — only what's been captured (Yahoo market IV where available, else manual
-    entry) since. Builds up a real, if short, series over time.
+    entry) since. Builds up a real, if short, series over time. The latest reading is tagged
+    with its own CHEAP/FAIR/EXPENSIVE signal (vs. trailing realized volatility) so a beginner
+    gets a plain-word reminder, not just a number — older readings stay untagged since we
+    can't accurately recompute realized volatility as of a past date. Computed from the
+    reading's own IV value (not the snapshot's current/entry IV) so the label always matches
+    the number it sits next to.
     """
     if not position.iv_history:
         return ["  No IV history yet — run `stocktool leaps update` over time to start building this up."]
     lines = []
-    for reading in position.iv_history[-8:]:
+    last_index = len(position.iv_history) - 1
+    for i, reading in enumerate(position.iv_history[-8:]):
         tag = "[dim](yahoo)[/dim]" if reading.source == "yahoo" else "[dim](manual)[/dim]"
-        lines.append(f"  {reading.date}: {reading.iv:.1f}% {tag}")
+        actual_index = len(position.iv_history) - min(8, len(position.iv_history)) + i
+        line = f"  {reading.date}: {reading.iv:.1f}% {tag}"
+        if actual_index == last_index:
+            label, color, _ratio = leaps_iv_value_verdict(reading.iv, snapshot.realized_volatility)
+            if label is not None:
+                line += f"  → [{color}]{label}[/{color}]"
+        lines.append(line)
     if len(position.iv_history) > 8:
         lines.append(f"  [dim]...and {len(position.iv_history) - 8} earlier reading(s) not shown.[/dim]")
+    entry_day_reading = next((r for r in position.iv_history if r.date == position.entry_date), None)
+    if (
+        entry_day_reading is not None
+        and position.entry_iv is not None
+        and abs(position.entry_iv - entry_day_reading.iv) > 5
+    ):
+        lines.append(
+            f"  [yellow]⚠ Entry-day IV mismatch: manually entered {position.entry_iv:.1f}% vs. "
+            f"Yahoo chain {entry_day_reading.iv:.1f}% that day.[/yellow]"
+        )
     if len(position.iv_history) >= 2:
         change = position.iv_history[-1].iv - position.iv_history[-2].iv
         arrow = "↑" if change > 0 else ("↓" if change < 0 else "→")
@@ -2251,11 +2380,12 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
             else "  Current delta: N/A — run `stocktool leaps update` with a fresh reading from your broker"
         ),
         f"  Current theta: -${abs(position.current_theta):.2f}/day" if position.current_theta is not None else "  Current theta: N/A",
-        f"  Current IV: {position.current_iv:.1f}%" if position.current_iv is not None else "  Current IV: N/A",
+        _leaps_current_iv_line(position, snapshot),
+        _leaps_iv_rank_line(snapshot),
         f"  Last updated: {position.last_updated}" if position.last_updated else "  Last updated: never — entry values are the only reading on file",
         "",
         "[bold cyan]IV History[/bold cyan]",
-        *_leaps_iv_history_lines(position),
+        *_leaps_iv_history_lines(position, snapshot),
         "",
         "[bold cyan]Computed[/bold cyan]",
         f"  Breakeven: ${snapshot.breakeven:.2f}" if snapshot.breakeven is not None else "  Breakeven: N/A",
@@ -2317,6 +2447,202 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
     console.print(Panel(
         "\n".join(lines),
         title=f"[bold magenta]LEAPS Position: {position.ticker}[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_gamma_chart(
+    curve: Optional[LeapsGammaCurve],
+    broker_delta: Optional[float],
+    broker_delta_label: str,
+    unavailable_reason: Optional[str] = None,
+) -> None:
+    """Render a compact terminal plot of modeled delta across underlying prices."""
+    if curve is None:
+        reason = unavailable_reason or "Required market inputs are unavailable."
+        console.print(Panel(
+            f"[dim]Gamma / theoretical delta chart unavailable: {reason} "
+            "Broker-entered delta and exposure calculations are unchanged.[/dim]",
+            title="[bold cyan]LEAPS Gamma and Delta[/bold cyan]",
+            border_style="cyan",
+        ))
+        return
+
+    low_delta, high_delta = ((0.0, 1.0) if curve.option_type == "CALL" else (-1.0, 0.0))
+    plot_height, plot_width = 9, 41
+    grid = [[" " for _ in range(plot_width)] for _ in range(plot_height)]
+    first_price, last_price = curve.points[0].stock_price, curve.points[-1].stock_price
+    samples = curve.points
+    sample_columns = {
+        round(index * (plot_width - 1) / (len(samples) - 1))
+        for index in range(len(samples))
+    }
+    previous_row = None
+    for column in range(plot_width):
+        price = first_price + (last_price - first_price) * column / (plot_width - 1)
+        for left, right in zip(samples, samples[1:]):
+            if left.stock_price <= price <= right.stock_price:
+                portion = (price - left.stock_price) / (right.stock_price - left.stock_price)
+                delta = left.delta + portion * (right.delta - left.delta)
+                break
+        else:
+            delta = samples[-1].delta
+        row = round((high_delta - delta) / (high_delta - low_delta) * (plot_height - 1))
+        row = max(0, min(plot_height - 1, row))
+        if column in sample_columns:
+            grid[row][column] = "◆" if column == plot_width // 2 else "●"
+        elif previous_row is not None:
+            connector = "─" if row == previous_row else ("╱" if row < previous_row else "╲")
+            grid[row][column] = connector
+        previous_row = row
+
+    lines = [
+        f"Black–Scholes delta at ${curve.spot:,.2f}: [bold]{curve.model_delta:+.3f}[/bold]  ·  "
+        f"Gamma: [bold]{curve.gamma:.5f} delta / $1[/bold]"
+    ]
+    if broker_delta is not None:
+        lines.append(f"Broker-entered delta ({broker_delta_label}): {broker_delta:+.3f}  ·  model remains separate")
+    for row_index, cells in enumerate(grid):
+        axis_delta = high_delta - row_index * (high_delta - low_delta) / (plot_height - 1)
+        lines.append(f"{axis_delta:+.3f} │" + "".join(cells))
+    lines.extend([
+        f"     ${first_price:,.2f}  " + " " * 9 + f"◆ ${curve.spot:,.2f} current " + " " * 6 + f"${last_price:,.2f}",
+        f"Near spot: +$1 stock ≈ {curve.gamma:+.5f} delta; -$1 ≈ {-curve.gamma:+.5f}. "
+        f"+$5 ≈ {curve.gamma * 5:+.5f}; -$5 ≈ {-curve.gamma * 5:+.5f} delta (gamma × stock move).",
+        f"Inputs: IV {curve.implied_volatility_pct:.2f}% ({curve.iv_source}); "
+        f"risk-free {curve.risk_free_rate_pct:.2f}% ({curve.risk_free_source}); "
+        f"dividend yield {curve.dividend_yield_pct:.2f}% ({curve.dividend_source}); "
+        f"spot ${curve.spot:.2f} (Yahoo close {curve.spot_as_of or 'date unavailable'}); "
+        f"{curve.days_to_expiry} days to expiry.",
+        "[dim]What-if curve across ±20% stock price; holds IV, time, rates, and yield fixed. "
+        "European Black–Scholes approximation; gamma is the local slope. Positive gamma means "
+        "call delta rises with stock price and put delta moves toward zero. Broker delta remains "
+        "the exposure input.[/dim]",
+    ])
+    console.print(Panel(
+        "\n".join(lines),
+        title=f"[bold cyan]LEAPS Gamma and Delta · {curve.ticker} {curve.option_type}[/bold cyan]",
+        border_style="cyan",
+    ))
+
+
+def render_leaps_vega_section(
+    curve: Optional[LeapsGammaCurve],
+    impact: Optional[LeapsVegaImpact],
+    unavailable_reason: Optional[str],
+) -> None:
+    """Vega and its dollar impact — reuses the same model inputs as the gamma/delta chart."""
+    if curve is None or impact is None:
+        console.print(Panel(
+            unavailable_reason or "Vega unavailable; missing model inputs.",
+            title="[bold magenta]Vega Analysis[/bold magenta]",
+            border_style="magenta",
+        ))
+        return
+    lines = [
+        f"Current vega: ${impact.vega_per_contract:,.2f} per contract per 1pt IV move "
+        f"(${impact.vega_total:,.2f} total for this position)",
+        f"  Impact of +10 IV points: [green]+${impact.impact_plus_10:,.2f}[/green]",
+        f"  Impact of -10 IV points: [red]{impact.impact_minus_10:,.2f}[/red]  (pre-earnings-crush scenario)",
+        f"  Impact of -20 IV points: [red]{impact.impact_minus_20:,.2f}[/red]  (panic-crush scenario)",
+        "",
+    ]
+    if impact.entry_iv is not None:
+        lines.append(f"Entry IV: {impact.entry_iv:.1f}%")
+    if impact.current_iv is not None:
+        fallback_note = " [dim](entry IV — no current reading)[/dim]" if impact.current_iv_is_fallback else ""
+        lines.append(f"Current IV: {impact.current_iv:.1f}%{fallback_note}")
+    if impact.iv_change_pts is not None:
+        arrow = "↑" if impact.iv_change_pts > 0 else ("↓" if impact.iv_change_pts < 0 else "→")
+        pnl_color = "green" if impact.vega_pnl_since_entry >= 0 else "red"
+        lines.append(f"IV change since entry: {arrow} {impact.iv_change_pts:+.1f}pts")
+        lines.append(
+            f"Vega P&L contribution since entry: [{pnl_color}]~${impact.vega_pnl_since_entry:+,.2f}[/{pnl_color}]"
+        )
+    else:
+        lines.append("IV change since entry: N/A — needs both an entry IV and a current/fallback IV")
+    lines.append(
+        "[dim]Uses today's vega as a constant approximation across the whole move since entry — "
+        "vega itself drifts with price, time, and IV level.[/dim]"
+    )
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Vega Analysis[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_earnings_context(context: Optional[LeapsEarningsContext]) -> None:
+    if context is None:
+        console.print(Panel(
+            "No earnings date or move history available for this ticker.",
+            title="[bold magenta]Earnings Context[/bold magenta]",
+            border_style="magenta",
+        ))
+        return
+    lines = []
+    if context.next_earnings_date is not None:
+        lines.append(f"Next earnings: {context.next_earnings_date} ({context.days_to_earnings} days away)")
+    else:
+        lines.append("Next earnings: unavailable")
+    if context.avg_abs_move_pct is not None:
+        lines.append(
+            f"Historical earnings-window move: avg ±{context.avg_abs_move_pct:.1f}% over last "
+            f"{context.quarters_used} quarters · max ±{context.max_abs_move_pct:.1f}%"
+        )
+        if context.delta_impact_avg is not None:
+            lines.append(
+                f"Delta-only projection — avg move: up → {context.delta_impact_avg:+,.0f}, "
+                f"down → {-context.delta_impact_avg:+,.0f}"
+            )
+        if context.delta_impact_max is not None:
+            lines.append(
+                f"Delta-only projection — max historical move: up → {context.delta_impact_max:+,.0f}, "
+                f"down → {-context.delta_impact_max:+,.0f}"
+            )
+        lines.append(
+            "[dim]Close-to-close window: prior trading close to first close after the report date. "
+            "Release timing is unavailable, so before-market reports may include an extra session. "
+            "Delta-only estimate; IV change is not estimated.[/dim]"
+        )
+    else:
+        lines.append(f"[dim]No earnings-move history available ({context.quarters_used} quarters found).[/dim]")
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Earnings Context[/bold magenta]",
+        border_style="magenta",
+    ))
+
+
+def render_leaps_liquidity(option_quote: dict, contracts: int) -> None:
+    """Bid/ask/volume/open-interest context — passed straight from the already-fetched quote
+    dict rather than stored on LeapsSnapshot, since both callers already hold it in scope."""
+    bid, ask, mid = option_quote.get("bid"), option_quote.get("ask"), option_quote.get("mid")
+    spread_pct = option_quote.get("spread_pct")
+    volume, open_interest = option_quote.get("volume"), option_quote.get("open_interest")
+    rating_label, rating_color = leaps_liquidity_rating(spread_pct, open_interest)
+    lines = []
+    if bid is not None and ask is not None:
+        mid_str = f"  Mid: ${mid:.2f}" if mid is not None else ""
+        lines.append(f"Bid/Ask: ${bid:.2f} / ${ask:.2f}{mid_str}")
+        if spread_pct is not None:
+            spread_cost = (ask - bid) * 100 * contracts
+            lines.append(
+                f"Spread: ${ask - bid:.2f} ({spread_pct:.1f}% of mid) · round-trip cost estimate: "
+                f"~${spread_cost:,.2f} [dim](estimate, not a guaranteed execution cost)[/dim]"
+            )
+    else:
+        lines.append("Bid/Ask: unavailable")
+    if open_interest is not None:
+        lines.append(f"Open interest: {open_interest:,.0f} contracts")
+    if volume is not None:
+        lines.append(f"Volume (latest session): {volume:,.0f} contracts")
+    if volume is not None and open_interest:
+        lines.append(f"Volume/OI ratio: {volume / open_interest:.2f}")
+    lines.append(f"Liquidity rating: [{rating_color}]{rating_label}[/{rating_color}]")
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold magenta]Market Liquidity[/bold magenta]",
         border_style="magenta",
     ))
 

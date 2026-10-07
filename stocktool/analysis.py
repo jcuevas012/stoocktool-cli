@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -121,15 +122,16 @@ class ValuationSnapshot:
     capex_pct_revenue: Optional[float] = None    # abs(capex_cf) / total_revenue * 100
     capex_pct_net_income: Optional[float] = None # abs(capex_cf) / net_income * 100 (None if net_income <= 0)
     # DCF intrinsic value (10-step methodology)
-    dcf_net_income: Optional[float] = None       # step 1 normalized NI
+    dcf_net_income: Optional[float] = None       # step 1 forecast NI estimate
     dcf_owner_earnings: Optional[float] = None   # step 2
+    dcf_owner_earnings_base_year: int = 0
     dcf_owner_earnings_note: Optional[str] = None
     dcf_data_note: Optional[str] = None
     dcf_growth_rate: Optional[float] = None      # step 3
     dcf_growth_note: Optional[str] = None
     dcf_discount_rate: float = 0.10              # step 4
     dcf_terminal_growth: float = 0.025           # step 5
-    dcf_enterprise_value: Optional[float] = None # step 6
+    dcf_pv_owner_earnings: Optional[float] = None # step 6
     dcf_equity_value: Optional[float] = None     # step 7
     intrinsic_value_per_share: Optional[float] = None  # step 8
     intrinsic_value_low: Optional[float] = None
@@ -142,6 +144,13 @@ class ValuationSnapshot:
     earnings_years: list[EarningsPeriod] = field(default_factory=list)     # newest first
     earnings_margin_trend: Optional[str] = None   # "EXPANDING" / "STABLE" / "COMPRESSING"
     earnings_simple_note: Optional[str] = None    # e.g. "For every $10 in revenue, keeps $2.70 (27%)"
+    # Institutional Ownership & Flow (Section 9)
+    institutions_pct: Optional[float] = None       # % of shares held by institutions
+    insiders_pct: Optional[float] = None           # % of shares held by insiders
+    institutions_count: Optional[int] = None
+    institutional_report_date: Optional[str] = None  # most recent 13F filing date, shared by top_holders
+    top_institutional_holders: list[dict] = field(default_factory=list)  # [{holder, pct_held, value, pct_change}]
+    institutional_flow: Optional["InstitutionalFlowSignal"] = None
 
 
 def pe_category(pe: Optional[float]) -> tuple[str, str]:
@@ -198,17 +207,17 @@ def _select_dcf_growth_rate(
     """Choose a conservative DCF growth rate. Returns (rate, explanation)."""
     candidates = []
     parts = []
-    if revenue_growth is not None and revenue_growth > 0:
+    if revenue_growth is not None:
         candidates.append(revenue_growth)
-        parts.append(f"rev +{revenue_growth:.1%}")
-    if eps_growth is not None and eps_growth > 0:
+        parts.append(f"rev {revenue_growth:+.1%}")
+    if eps_growth is not None:
         candidates.append(eps_growth)
-        parts.append(f"EPS +{eps_growth:.1%}")
+        parts.append(f"EPS {eps_growth:+.1%}")
 
-    quality = roe or roa or 0.0
+    quality = roe if roe is not None else (roa if roa is not None else 0.0)
 
     if not candidates:
-        return 0.04, "No positive growth signals found; conservative 4% default assumed"
+        return 0.0, "Growth data unavailable; no-growth assumption used"
 
     avg = sum(candidates) / len(candidates)
 
@@ -220,8 +229,11 @@ def _select_dcf_growth_rate(
     else:
         cap, tier = 0.08, "mature/average business"
 
-    rate = min(avg, cap)
-    note = f"Avg of {', '.join(parts)}, capped at {cap:.0%} for {tier}"
+    # Prevent noisy yfinance growth rates from creating negative projected cash flows
+    # through a one-period collapse or implausibly extreme positive compounding.
+    rate = max(-0.50, min(avg, cap))
+    floor_note = "; floored at -50%" if avg < -0.50 else ""
+    note = f"Avg of {', '.join(parts)}, capped at {cap:.0%} for {tier}{floor_note}"
     return rate, note
 
 
@@ -231,13 +243,25 @@ def _run_dcf(
     discount_rate: float = 0.10,
     terminal_growth: float = 0.025,
     n_years: int = 10,
+    base_year: int = 0,
 ) -> tuple[float, float]:
-    """Return (pv_of_projected_earnings, pv_of_terminal_value)."""
+    """Return (PV of explicit cash flows, PV of terminal value).
+
+    `base_year=0` means owner_earnings is the current-year baseline, so year 1 grows
+    once. `base_year=1` means it is already a year-1 estimate, so year 1 is discounted
+    without applying another year of growth. The selected rate is held constant through
+    the explicit forecast period; it is a scenario assumption, not a forecast.
+    """
+    if discount_rate <= terminal_growth:
+        raise ValueError("discount_rate must exceed terminal_growth")
+
+    if base_year not in (0, 1):
+        raise ValueError("base_year must be 0 or 1")
     pv_oe = sum(
-        owner_earnings * (1 + growth_rate) ** t / (1 + discount_rate) ** t
-        for t in range(1, n_years + 1)
+        owner_earnings * (1 + growth_rate) ** (year - base_year) / (1 + discount_rate) ** year
+        for year in range(1, n_years + 1)
     )
-    oe_year_n = owner_earnings * (1 + growth_rate) ** n_years
+    oe_year_n = owner_earnings * (1 + growth_rate) ** (n_years - base_year)
     terminal_value = oe_year_n * (1 + terminal_growth) / (discount_rate - terminal_growth)
     pv_tv = terminal_value / (1 + discount_rate) ** n_years
     return pv_oe, pv_tv
@@ -350,6 +374,46 @@ def _earnings_simple_note(ticker: str, latest: Optional[EarningsPeriod]) -> Opti
     )
 
 
+@dataclass
+class InstitutionalFlowSignal:
+    net_flow_pct: float
+    holders_increasing: int
+    holders_decreasing: int
+    holders_unchanged: int
+    label: str
+    color: str
+
+
+def _institutional_flow_signal(top_holders: list[dict]) -> Optional["InstitutionalFlowSignal"]:
+    """Dollar-weighted average of the top holders' most recent quarter-over-quarter position
+    change (`pct_change`, already in percent), plus a simple increasing/decreasing/unchanged
+    count. `None` if there are no holders or their total value is zero (nothing to weight by).
+    """
+    if not top_holders:
+        return None
+    total_value = sum(h["value"] for h in top_holders)
+    if not total_value:
+        return None
+    net_flow_pct = sum(h["pct_change"] * h["value"] for h in top_holders) / total_value
+    increasing = sum(1 for h in top_holders if h["pct_change"] > 0)
+    decreasing = sum(1 for h in top_holders if h["pct_change"] < 0)
+    unchanged = len(top_holders) - increasing - decreasing
+    if net_flow_pct > 1.0:
+        label, color = "NET BUYING", "green"
+    elif net_flow_pct < -1.0:
+        label, color = "NET SELLING", "red"
+    else:
+        label, color = "MIXED/FLAT", "yellow"
+    return InstitutionalFlowSignal(
+        net_flow_pct=net_flow_pct,
+        holders_increasing=increasing,
+        holders_decreasing=decreasing,
+        holders_unchanged=unchanged,
+        label=label,
+        color=color,
+    )
+
+
 def build_valuation_snapshot(
     ticker: str,
     info: dict,
@@ -359,9 +423,11 @@ def build_valuation_snapshot(
     cf_data: Optional[dict] = None,
     sma_200: Optional[float] = None,
     earnings_data: Optional[dict] = None,
+    institutional_data: Optional[dict] = None,
 ) -> "ValuationSnapshot":
     """Build a ValuationSnapshot with projected future market cap, return, and DCF intrinsic value."""
     bs_data = bs_data or {}
+    institutional_data = institutional_data or {}
     eps = _safe_float(info.get("trailingEps"))
     current_price = _safe_float(info.get("currentPrice"))
     current_price_from_history = False
@@ -480,22 +546,25 @@ def build_valuation_snapshot(
     discount_rate = 0.10
     terminal_growth = 0.025
 
-    # Step 1: Normalized Net Income
+    # Step 1: Forecast net income from next-year revenue and current margin.
     dcf_net_income: Optional[float] = None
     if next_year_revenue and profit_margin:
         dcf_net_income = next_year_revenue * profit_margin
 
-    # Step 2: Owner Earnings = NI + Dep - Maintenance CapEx
+    # Step 2: Owner Earnings. The complete formula uses forecast NI with latest
+    # reported D&A and total CapEx; this is a disclosed proxy, not maintenance CapEx.
     dcf_owner_earnings: Optional[float] = None
+    dcf_owner_earnings_base_year = 1 if dcf_net_income is not None else 0
     dcf_owner_earnings_note: Optional[str] = None
     dcf_data_note: Optional[str] = None
     if dcf_net_income is not None and depreciation is not None and capex_cf is not None:
         dcf_owner_earnings = dcf_net_income + depreciation + capex_cf  # capex_cf already negative
         dcf_owner_earnings_note = "NI + D&A + CapEx (latest year; CapEx is total, not maintenance-only)"
         dcf_data_note = "Working-capital changes are not included; latest reported D&A/CapEx are paired with forecast net income."
-    elif dcf_net_income is not None and free_cashflow is not None and free_cashflow > 0:
-        # FCF ≈ NI + D&A - CapEx, so use it as proxy when D&A/CapEx unavailable
+    elif free_cashflow is not None and free_cashflow > 0:
+        # FCF is a current trailing baseline, so project its first growth step in year 1.
         dcf_owner_earnings = free_cashflow
+        dcf_owner_earnings_base_year = 0
         dcf_owner_earnings_note = "Free Cash Flow proxy used (D&A/CapEx unavailable)"
         dcf_data_note = "FCF is a proxy for owner earnings; working-capital treatment may differ from the full formula."
     elif dcf_net_income is not None and dcf_net_income > 0:
@@ -506,7 +575,7 @@ def build_valuation_snapshot(
     # Steps 3-10
     dcf_growth_rate: Optional[float] = None
     dcf_growth_note: Optional[str] = None
-    dcf_enterprise_value: Optional[float] = None
+    dcf_pv_owner_earnings: Optional[float] = None
     dcf_equity_value: Optional[float] = None
     intrinsic_value_per_share: Optional[float] = None
     intrinsic_value_low: Optional[float] = None
@@ -517,24 +586,33 @@ def build_valuation_snapshot(
 
     if dcf_owner_earnings is not None and dcf_owner_earnings > 0:
         dcf_growth_rate, dcf_growth_note = _select_dcf_growth_rate(revenue_growth, eps_growth, roe, roa)
-        pv_oe, pv_tv = _run_dcf(dcf_owner_earnings, dcf_growth_rate, discount_rate, terminal_growth)
-        dcf_enterprise_value = pv_oe + pv_tv
+        pv_oe, pv_tv = _run_dcf(
+            dcf_owner_earnings, dcf_growth_rate, discount_rate, terminal_growth,
+            base_year=dcf_owner_earnings_base_year,
+        )
+        dcf_pv_owner_earnings = pv_oe + pv_tv
         # Owner Earnings starts from net income, an equity cash-flow basis. Do not
         # add cash or subtract debt, which would mix equity and enterprise methods.
-        dcf_equity_value = dcf_enterprise_value
+        dcf_equity_value = dcf_pv_owner_earnings
         # Step 8: per-share
         if shares_outstanding and shares_outstanding > 0:
             intrinsic_value_per_share = dcf_equity_value / shares_outstanding
             # Sensitivity envelope: lower growth/higher discount vs. higher growth/lower
             # discount. It is a model range, not a confidence interval.
-            low_growth = max(0.0, dcf_growth_rate - 0.02)
+            low_growth = max(-0.50, dcf_growth_rate - 0.02)
             high_growth = min(0.20, dcf_growth_rate + 0.02)
-            low_pv = sum(dcf_owner_earnings * (1 + low_growth) ** year / 1.12 ** year for year in range(1, 11))
-            low_terminal = dcf_owner_earnings * (1 + low_growth) ** 10 * (1 + terminal_growth) / (0.12 - terminal_growth) / 1.12 ** 10
-            high_pv = sum(dcf_owner_earnings * (1 + high_growth) ** year / 1.08 ** year for year in range(1, 11))
-            high_terminal = dcf_owner_earnings * (1 + high_growth) ** 10 * (1 + terminal_growth) / (0.08 - terminal_growth) / 1.08 ** 10
-            intrinsic_value_low = (low_pv + low_terminal) / shares_outstanding
-            intrinsic_value_high = (high_pv + high_terminal) / shares_outstanding
+            low_pv, low_terminal = _run_dcf(
+                dcf_owner_earnings, low_growth, 0.12, terminal_growth,
+                base_year=dcf_owner_earnings_base_year,
+            )
+            high_pv, high_terminal = _run_dcf(
+                dcf_owner_earnings, high_growth, 0.08, terminal_growth,
+                base_year=dcf_owner_earnings_base_year,
+            )
+            low_scenario_value = (low_pv + low_terminal) / shares_outstanding
+            high_scenario_value = (high_pv + high_terminal) / shares_outstanding
+            intrinsic_value_low = min(low_scenario_value, high_scenario_value)
+            intrinsic_value_high = max(low_scenario_value, high_scenario_value)
         # Step 9 & 10
         if intrinsic_value_per_share and current_price and intrinsic_value_per_share > 0:
             margin_of_safety_pct = (intrinsic_value_per_share - current_price) / intrinsic_value_per_share * 100
@@ -568,6 +646,9 @@ def build_valuation_snapshot(
     earnings_simple_note = _earnings_simple_note(
         ticker, earnings_years[0] if earnings_years else (earnings_quarters[0] if earnings_quarters else None)
     )
+
+    top_institutional_holders = institutional_data.get("top_holders", [])
+    institutional_flow = _institutional_flow_signal(top_institutional_holders)
 
     return ValuationSnapshot(
         ticker=ticker,
@@ -614,13 +695,14 @@ def build_valuation_snapshot(
         capex_pct_net_income=capex_pct_net_income,
         dcf_net_income=dcf_net_income,
         dcf_owner_earnings=dcf_owner_earnings,
+        dcf_owner_earnings_base_year=dcf_owner_earnings_base_year,
         dcf_owner_earnings_note=dcf_owner_earnings_note,
         dcf_data_note=dcf_data_note,
         dcf_growth_rate=dcf_growth_rate,
         dcf_growth_note=dcf_growth_note,
         dcf_discount_rate=discount_rate,
         dcf_terminal_growth=terminal_growth,
-        dcf_enterprise_value=dcf_enterprise_value,
+        dcf_pv_owner_earnings=dcf_pv_owner_earnings,
         dcf_equity_value=dcf_equity_value,
         intrinsic_value_per_share=intrinsic_value_per_share,
         intrinsic_value_low=intrinsic_value_low,
@@ -632,6 +714,12 @@ def build_valuation_snapshot(
         earnings_years=earnings_years,
         earnings_margin_trend=earnings_margin_trend,
         earnings_simple_note=earnings_simple_note,
+        institutions_pct=institutional_data.get("institutions_pct"),
+        insiders_pct=institutional_data.get("insiders_pct"),
+        institutions_count=institutional_data.get("institutions_count"),
+        institutional_report_date=institutional_data.get("report_date"),
+        top_institutional_holders=top_institutional_holders,
+        institutional_flow=institutional_flow,
     )
 
 
@@ -1336,6 +1424,195 @@ def _score_return(r: Optional[float]) -> str:
 
 # --- LEAPS tracking ---
 
+
+@dataclass
+class LeapsGammaPoint:
+    stock_price: float
+    delta: float
+
+
+@dataclass
+class LeapsGammaCurve:
+    """Black–Scholes delta curve for a LEAPS contract at fixed model inputs."""
+    ticker: str
+    option_type: str
+    spot: float
+    model_delta: float
+    gamma: float  # change in delta per $1 underlying move
+    vega: float   # dollars per contract per 1 IV-percentage-point move, at the current spot
+    implied_volatility_pct: float
+    risk_free_rate_pct: float
+    dividend_yield_pct: float
+    days_to_expiry: int
+    iv_source: str
+    risk_free_source: str
+    dividend_source: str
+    spot_as_of: Optional[str] = None
+    points: list[LeapsGammaPoint] = field(default_factory=list)
+
+
+def _normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def _normal_pdf(value: float) -> float:
+    return math.exp(-0.5 * value ** 2) / math.sqrt(2.0 * math.pi)
+
+
+def _black_scholes_greeks(
+    option_type: str,
+    stock_price: float,
+    strike: float,
+    years_to_expiry: float,
+    volatility: float,
+    risk_free_rate: float,
+    dividend_yield: float,
+) -> tuple[float, float, float]:
+    """Return European Black–Scholes delta, gamma, and vega using continuous rates/yield.
+
+    Vega is scaled to dollars per contract per 1 percentage-point change in IV: the textbook
+    per-share vega (dollars per 1.00 = 100-point change in vol) divided by 100 for one
+    percentage point, multiplied by 100 shares per contract — the two scalings cancel, so the
+    raw S × e^(-qT) × φ(d1) × √T already is the right number.
+    """
+    if min(stock_price, strike, years_to_expiry, volatility) <= 0:
+        raise ValueError("stock price, strike, time, and volatility must be positive")
+    root_t = math.sqrt(years_to_expiry)
+    d1 = (
+        math.log(stock_price / strike)
+        + (risk_free_rate - dividend_yield + 0.5 * volatility**2) * years_to_expiry
+    ) / (volatility * root_t)
+    discounted_dividend = math.exp(-dividend_yield * years_to_expiry)
+    if option_type.upper() == "CALL":
+        delta = discounted_dividend * _normal_cdf(d1)
+    elif option_type.upper() == "PUT":
+        delta = discounted_dividend * (_normal_cdf(d1) - 1.0)
+    else:
+        raise ValueError("option_type must be CALL or PUT")
+    pdf_d1 = _normal_pdf(d1)
+    gamma = discounted_dividend * pdf_d1 / (stock_price * volatility * root_t)
+    vega = stock_price * discounted_dividend * pdf_d1 * root_t
+    return delta, gamma, vega
+
+
+def build_leaps_gamma_curve(
+    position: LeapsPosition,
+    stock_price: Optional[float],
+    implied_volatility_pct: Optional[float],
+    risk_free_rate_pct: Optional[float],
+    dividend_yield_pct: Optional[float],
+    *,
+    iv_source: str = "Yahoo option chain",
+    risk_free_source: str = "Yahoo ^TNX 10-year Treasury yield",
+    dividend_source: str = "Yahoo ticker dividend yield",
+    spot_as_of: Optional[str] = None,
+    price_range_pct: float = 20.0,
+    point_count: int = 9,
+) -> Optional[LeapsGammaCurve]:
+    """Build a delta-versus-stock-price curve. Returns None when model inputs are unavailable.
+
+    The curve holds IV, rates, dividend yield, and time to expiry fixed at their current
+    readings. Gamma is local curvature: approximately how much delta changes per $1 stock move.
+    """
+    inputs = (stock_price, implied_volatility_pct, risk_free_rate_pct, dividend_yield_pct)
+    if any(value is None or not math.isfinite(float(value)) for value in inputs):
+        return None
+    if point_count < 3 or point_count % 2 == 0 or price_range_pct <= 0:
+        raise ValueError("point_count must be odd and at least 3; price_range_pct must be positive")
+
+    days_to_expiry = (date.fromisoformat(position.expiration) - date.today()).days
+    if days_to_expiry <= 0 or stock_price <= 0 or position.strike <= 0 or implied_volatility_pct <= 0:
+        return None
+    years = days_to_expiry / 365.0
+    volatility = implied_volatility_pct / 100.0
+    risk_free = risk_free_rate_pct / 100.0
+    dividend_yield = dividend_yield_pct / 100.0
+    model_delta, gamma, vega = _black_scholes_greeks(
+        position.option_type, stock_price, position.strike, years, volatility, risk_free, dividend_yield
+    )
+
+    points: list[LeapsGammaPoint] = []
+    for index in range(point_count):
+        offset_pct = -price_range_pct + 2 * price_range_pct * index / (point_count - 1)
+        scenario_price = stock_price * (1 + offset_pct / 100.0)
+        scenario_delta, _, _ = _black_scholes_greeks(
+            position.option_type, scenario_price, position.strike, years, volatility, risk_free, dividend_yield
+        )
+        points.append(LeapsGammaPoint(stock_price=scenario_price, delta=scenario_delta))
+
+    return LeapsGammaCurve(
+        ticker=position.ticker,
+        option_type=position.option_type,
+        spot=stock_price,
+        model_delta=model_delta,
+        gamma=gamma,
+        vega=vega,
+        implied_volatility_pct=implied_volatility_pct,
+        risk_free_rate_pct=risk_free_rate_pct,
+        dividend_yield_pct=dividend_yield_pct,
+        days_to_expiry=days_to_expiry,
+        iv_source=iv_source,
+        risk_free_source=risk_free_source,
+        dividend_source=dividend_source,
+        spot_as_of=spot_as_of,
+        points=points,
+    )
+
+@dataclass
+class LeapsVegaImpact:
+    """Dollar impact of IV moves, derived from a LeapsGammaCurve's current-spot vega."""
+    vega_per_contract: float  # $ per contract per 1 IV percentage point
+    vega_total: float         # vega_per_contract * contracts
+    impact_plus_10: float
+    impact_minus_10: float
+    impact_minus_20: float
+    entry_iv: Optional[float]
+    current_iv: Optional[float]
+    current_iv_is_fallback: bool  # True when current_iv is really entry_iv, no current reading
+    iv_change_pts: Optional[float]
+    vega_pnl_since_entry: Optional[float]
+
+
+def build_leaps_vega_impact(
+    curve: Optional["LeapsGammaCurve"], position: LeapsPosition,
+    current_iv: Optional[float] = None,
+) -> Optional[LeapsVegaImpact]:
+    """Dollar impact of IV moves, using today's model vega as a constant approximation across
+    the whole move since entry (vega itself drifts with price, time, and IV level).
+
+    Returns None only when the gamma curve itself is unavailable — vega_total is still
+    computable even with no IV history at all; only the "since entry" fields become None then.
+    """
+    if curve is None:
+        return None
+    vega_total = curve.vega * position.contracts
+    entry_iv = position.entry_iv
+    # The caller passes this run's live market IV when available. `None` means no
+    # live reading was fetched, so fall back to the explicitly saved current IV.
+    current_iv_is_fallback = current_iv is None and position.current_iv is None and entry_iv is not None
+    current_iv = current_iv if current_iv is not None else position.current_iv
+    if current_iv is None:
+        current_iv = entry_iv
+        current_iv_is_fallback = entry_iv is not None
+    iv_change_pts = None
+    vega_pnl_since_entry = None
+    if entry_iv is not None and current_iv is not None:
+        iv_change_pts = current_iv - entry_iv
+        vega_pnl_since_entry = vega_total * iv_change_pts
+    return LeapsVegaImpact(
+        vega_per_contract=curve.vega,
+        vega_total=vega_total,
+        impact_plus_10=vega_total * 10,
+        impact_minus_10=vega_total * -10,
+        impact_minus_20=vega_total * -20,
+        entry_iv=entry_iv,
+        current_iv_is_fallback=current_iv_is_fallback,
+        current_iv=current_iv,
+        iv_change_pts=iv_change_pts,
+        vega_pnl_since_entry=vega_pnl_since_entry,
+    )
+
+
 @dataclass
 class LeapsSnapshot:
     """Computed view of one LeapsPosition: entry data plus derived calculations."""
@@ -1380,6 +1657,17 @@ class LeapsSnapshot:
     effective_position_pct: Optional[float] = None
     leverage_ratio: Optional[float] = None
     realized_pnl: Optional[float] = None
+    # --- IV value signal (cheap/fair/expensive vs. realized volatility proxy) ---
+    realized_volatility: Optional[float] = None
+    iv_value_ratio: Optional[float] = None
+    iv_value_label: Optional[str] = None
+    iv_value_color: str = "dim"
+    iv_rank_pct: Optional[float] = None
+    iv_rank_label: Optional[str] = None
+    iv_rank_color: str = "dim"
+    iv_range_low: Optional[float] = None
+    iv_range_high: Optional[float] = None
+    iv_rank_reading_count: int = 0
 
 
 def leaps_dte_color(days_to_expiry: Optional[int]) -> str:
@@ -1476,6 +1764,144 @@ def leaps_exposure_color(effective_position_pct: Optional[float]) -> str:
     return "green"
 
 
+def leaps_iv_value_verdict(
+    market_iv: Optional[float], realized_vol: Optional[float]
+) -> tuple[Optional[str], str, Optional[float]]:
+    """Classify a LEAPS contract's market IV as CHEAP/FAIR/EXPENSIVE against trailing realized
+    volatility — the free-data proxy for "average IV" used throughout this tool, since yfinance
+    has no historical-implied-volatility series. A beginner-facing signal, not a precise IV rank.
+
+    Returns (label, color, ratio) — label and ratio are None when either input is missing.
+    """
+    if market_iv is None or not realized_vol:
+        return None, "dim", None
+    from .config import LEAPS_IV_CHEAP_RATIO, LEAPS_IV_EXPENSIVE_RATIO
+    ratio = market_iv / realized_vol
+    if ratio <= LEAPS_IV_CHEAP_RATIO:
+        return "CHEAP", "green", ratio
+    if ratio >= LEAPS_IV_EXPENSIVE_RATIO:
+        return "EXPENSIVE", "red", ratio
+    return "FAIR", "yellow", ratio
+
+
+@dataclass
+class LeapsIvRank:
+    rank_pct: float
+    label: str
+    color: str
+    range_low: float
+    range_high: float
+    reading_count: int
+
+
+def leaps_iv_rank(current_iv: Optional[float], iv_history: list) -> Optional[LeapsIvRank]:
+    """IV range rank against this position's own accumulated history. Boundaries are
+    inclusive on the lower bucket (exactly 30.0 is CHEAP, exactly 60.0 is NORMAL, etc.)."""
+    from .config import (
+        LEAPS_IV_RANK_MIN_READINGS, LEAPS_IV_RANK_CHEAP_MAX,
+        LEAPS_IV_RANK_NORMAL_MAX, LEAPS_IV_RANK_ELEVATED_MAX,
+    )
+    if current_iv is None or len(iv_history) < LEAPS_IV_RANK_MIN_READINGS:
+        return None
+    values = [r.iv for r in iv_history]
+    low, high = min(values), max(values)
+    rank_pct = 50.0 if high == low else max(0.0, min(100.0, (current_iv - low) / (high - low) * 100))
+    if rank_pct <= LEAPS_IV_RANK_CHEAP_MAX:
+        label, color = "CHEAP", "green"
+    elif rank_pct <= LEAPS_IV_RANK_NORMAL_MAX:
+        label, color = "NORMAL", "yellow"
+    elif rank_pct <= LEAPS_IV_RANK_ELEVATED_MAX:
+        label, color = "ELEVATED", "orange3"
+    else:
+        label, color = "EXPENSIVE", "red"
+    return LeapsIvRank(
+        rank_pct=rank_pct, label=label, color=color,
+        range_low=low, range_high=high, reading_count=len(iv_history),
+    )
+
+
+@dataclass
+class LeapsEarningsStats:
+    avg_abs_move_pct: float
+    max_abs_move_pct: float
+    quarters_used: int
+
+
+def leaps_earnings_move_stats(moves: list[dict]) -> Optional[LeapsEarningsStats]:
+    """Summary stats over fetch_earnings_move_history()'s per-quarter moves. None if empty."""
+    if not moves:
+        return None
+    abs_moves = [m["abs_pct_move"] for m in moves]
+    return LeapsEarningsStats(
+        avg_abs_move_pct=sum(abs_moves) / len(abs_moves),
+        max_abs_move_pct=max(abs_moves),
+        quarters_used=len(moves),
+    )
+
+
+@dataclass
+class LeapsEarningsContext:
+    ticker: str
+    next_earnings_date: Optional[str]
+    days_to_earnings: Optional[int]
+    avg_abs_move_pct: Optional[float]
+    max_abs_move_pct: Optional[float]
+    quarters_used: int
+    delta_impact_avg: Optional[float]  # dollar impact if the stock moves UP by avg_abs_move_pct;
+    delta_impact_max: Optional[float]  # negate for the down-move scenario (delta-only, symmetric)
+
+
+def build_leaps_earnings_context(
+    position: LeapsPosition,
+    current_price: Optional[float],
+    effective_delta: Optional[float],
+    next_earnings_date: Optional[str],
+    days_to_earnings: Optional[int],
+    moves: list[dict],
+) -> Optional[LeapsEarningsContext]:
+    """Combines historical earnings-move stats with this position's effective delta for a
+    delta-only projection (no IV-crush estimate — see spec Non-goals). None only when there's
+    neither an earnings date nor any move history to show.
+    """
+    stats = leaps_earnings_move_stats(moves)
+    if next_earnings_date is None and stats is None:
+        return None
+    delta_impact_avg = None
+    delta_impact_max = None
+    if stats is not None and effective_delta is not None and current_price is not None:
+        delta_impact_avg = effective_delta * 100 * position.contracts * (current_price * stats.avg_abs_move_pct / 100)
+        delta_impact_max = effective_delta * 100 * position.contracts * (current_price * stats.max_abs_move_pct / 100)
+    return LeapsEarningsContext(
+        ticker=position.ticker,
+        next_earnings_date=next_earnings_date,
+        days_to_earnings=days_to_earnings,
+        avg_abs_move_pct=stats.avg_abs_move_pct if stats else None,
+        max_abs_move_pct=stats.max_abs_move_pct if stats else None,
+        quarters_used=stats.quarters_used if stats else 0,
+        delta_impact_avg=delta_impact_avg,
+        delta_impact_max=delta_impact_max,
+    )
+
+
+def leaps_liquidity_rating(spread_pct: Optional[float], open_interest: Optional[float]) -> tuple[str, str]:
+    """Liquidity rating from spread-of-mid and open interest. ('N/A', 'dim') when either input
+    is missing — never guesses at liquidity from partial data."""
+    from .config import (
+        LEAPS_LIQUIDITY_TIGHT_SPREAD_PCT, LEAPS_LIQUIDITY_MODERATE_SPREAD_PCT,
+        LEAPS_LIQUIDITY_WIDE_SPREAD_PCT, LEAPS_LIQUIDITY_TIGHT_OI,
+        LEAPS_LIQUIDITY_MODERATE_OI, LEAPS_LIQUIDITY_WIDE_OI,
+    )
+    if spread_pct is None or open_interest is None:
+        return "N/A", "dim"
+    if spread_pct < LEAPS_LIQUIDITY_TIGHT_SPREAD_PCT and open_interest > LEAPS_LIQUIDITY_TIGHT_OI:
+        return "TIGHT", "green"
+    if spread_pct < LEAPS_LIQUIDITY_MODERATE_SPREAD_PCT and open_interest > LEAPS_LIQUIDITY_MODERATE_OI:
+        return "MODERATE", "yellow"
+    if spread_pct < LEAPS_LIQUIDITY_WIDE_SPREAD_PCT and open_interest > LEAPS_LIQUIDITY_WIDE_OI:
+        return "WIDE", "orange3"
+    return "ILLIQUID", "red"
+
+
 def possible_return_verdict(pct: Optional[float]) -> tuple[str, str]:
     """Color + label for a valuation engine's possible_return_pct, mirroring build_valuation_snapshot's own convention."""
     if pct is None:
@@ -1494,6 +1920,7 @@ def build_leaps_snapshot(
     current_price: Optional[float],
     portfolio_value: Optional[float] = None,
     option_quote: Optional[dict] = None,
+    realized_vol: Optional[float] = None,
 ) -> LeapsSnapshot:
     option_quote = option_quote or {}
     is_active = position.status == "ACTIVE"
@@ -1578,6 +2005,22 @@ def build_leaps_snapshot(
             if theoretical_current_value and theoretical_current_value > 0:
                 leverage_ratio = abs(effective_delta * current_price) / theoretical_current_value
 
+    iv_value_label, iv_value_color, iv_value_ratio = None, "dim", None
+    iv_rank = None
+    if is_active:
+        # Prefer this run's live market IV (e.g. from leaps_show's auto-capture, which lands
+        # in option_quote but not in position.current_iv until a `leaps update` is run) over
+        # the possibly-stale current_iv/entry_iv fields — otherwise the rank can compare an
+        # old reading against a history that has since moved past it.
+        market_iv = option_quote.get("implied_volatility")
+        latest_iv = (
+            market_iv if market_iv is not None
+            else position.current_iv if position.current_iv is not None
+            else position.entry_iv
+        )
+        iv_value_label, iv_value_color, iv_value_ratio = leaps_iv_value_verdict(latest_iv, realized_vol)
+        iv_rank = leaps_iv_rank(latest_iv, position.iv_history)
+
     return LeapsSnapshot(
         id=position.id,
         ticker=position.ticker,
@@ -1618,6 +2061,16 @@ def build_leaps_snapshot(
         effective_position_pct=effective_position_pct,
         leverage_ratio=leverage_ratio,
         realized_pnl=position.realized_pnl if not is_active else None,
+        realized_volatility=realized_vol if is_active else None,
+        iv_value_ratio=iv_value_ratio,
+        iv_value_label=iv_value_label,
+        iv_value_color=iv_value_color,
+        iv_rank_pct=iv_rank.rank_pct if iv_rank else None,
+        iv_rank_label=iv_rank.label if iv_rank else None,
+        iv_rank_color=iv_rank.color if iv_rank else "dim",
+        iv_range_low=iv_rank.range_low if iv_rank else None,
+        iv_range_high=iv_rank.range_high if iv_rank else None,
+        iv_rank_reading_count=len(position.iv_history),
     )
 
 
@@ -1757,8 +2210,9 @@ def build_leaps_scenario(
     warnings: list[str] = []
     if position.entry_iv is not None:
         warnings.append(
-            f"IV at entry: {position.entry_iv:.1f}% — recheck current IV rank with your broker; "
-            "this tool doesn't track IV history."
+            f"IV at entry: {position.entry_iv:.1f}% — this tool tracks IV Rank over time via "
+            "`leaps show`/`leaps update`; check there for the current position in this "
+            "position's own history."
         )
     warnings.append(
         "Confirm the next earnings date before entering or exiting — earnings can cause a gap and a change in implied volatility; direction and size are uncertain."

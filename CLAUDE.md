@@ -274,6 +274,7 @@ Fetches: `.info` fundamentals + 3-year price history (also sliced for the 6-mont
 | 6 | Analyst Price Targets | Low / Mean / High price targets, upside %, analyst count, consensus, 200-day SMA & % vs price | `targetLowPrice`, `targetMeanPrice`, `targetHighPrice`, `recommendationKey`, `data.fetch_sma_data()` |
 | — | Valuation Projection | Revenue × margin = earnings; earnings × avg PE = future market cap → possible return | computed |
 | 8 | Earnings Growth Trend | Quarterly & annual Revenue/Net Income, net margin, QoQ/YoY growth, margin trend | `data.fetch_earnings_history()` — see dedicated section below |
+| 9 | Institutional Ownership & Flow | Institutional/insider ownership %, top-10 holders, $-weighted net institutional flow | `data.fetch_institutional_ownership()` — see dedicated section below |
 
 **Three-Year Price Context:** `cli.py`'s `valuation` command fetches 3 years of price history in one call; the 6-month price/EPS proxy is sliced from that data. Both proxies divide mean prices by current trailing EPS, so neither represents historical P/E. The comparison of current P/E with the 3-year proxy reduces algebraically to current price versus the 3-year mean price; it is price context, not a cheap/expensive verdict. The report displays the last price-history date and identifies this limitation in terminal and HTML output.
 
@@ -304,7 +305,7 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 
 ## DCF Intrinsic Value (Section 7 of `stocktool valuation`)
 
-Appended automatically to every `valuation` panel. Implements a 10-step Buffett Owner Earnings DCF.
+Appended automatically to every `valuation` panel. Implements a simplified 10-step Owner Earnings DCF estimate; total CapEx and latest-year cash-flow data are proxies, not a full Buffett maintenance-capital analysis.
 
 **Additional data fetched:** `fetch_cashflow_basics()` in `data.py` pulls depreciation + capex from the annual cashflow statement (same session as the other valuation fetches).
 
@@ -312,22 +313,23 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 
 | Step | Description |
 |------|-------------|
-| 1 | Normalized Net Income = Revenue Est. × Profit Margin (fallback: FCF) |
-| 2 | Owner Earnings = NI + Depreciation + CapEx (yfinance capex is negative) |
-| 3 | Growth Rate — conservative: avg(revenue_growth, eps_growth) capped by ROE tier |
+| 1 | Forecast Net Income = Next-Year Revenue Estimate × Current Profit Margin |
+| 2 | Owner Earnings proxy = NI + Depreciation + total CapEx (yfinance CapEx is negative) |
+| 3 | Growth Rate — average available revenue/EPS growth, including negative signals, capped by ROE tier; held constant as a scenario assumption; 0% if growth data is missing |
 | 4 | Discount Rate = 10% |
 | 5 | Terminal Growth = 2.5% |
-| 6 | Enterprise Value = PV(10yr OE) + PV(Terminal Value) |
-| 7 | Equity Value = EV + Cash − Debt |
+| 6 | Equity Value = PV(10yr Owner Earnings) + PV(Terminal Value) |
+| 7 | No cash/debt adjustment: cash flows start from net income, an equity cash-flow basis |
 | 8 | Intrinsic Value Per Share = Equity Value / Shares Outstanding |
 | 9 | Margin of Safety = (IV − Price) / IV × 100 |
 | 10 | Rating based on margin of safety |
 
 **Growth rate selection (in `analysis._select_dcf_growth_rate`):**
-- High-ROIC (ROE > 25%) + avg growth ≥ 10% → cap at 15%
-- Solid allocator (ROE > 15% or avg growth ≥ 8%) → cap at 12%
+- Negative growth inputs must not be discarded. Average all available revenue/EPS growth inputs; use 0% only when both are missing.
+- ROE proxy > 25% + avg growth ≥ 10% → cap at 15%
+- ROE proxy > 15% or avg growth ≥ 8% → cap at 12%
 - Mature/average → cap at 8%
-- No positive growth signals → default 4%
+- Cap extreme decline assumptions at -50% so yearly cash flows do not reverse sign from noisy growth data; disclose when this floor applies.
 
 **Rating thresholds:**
 
@@ -340,10 +342,12 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | < 5% | ★ Overvalued |
 
 **Fallback logic for Owner Earnings:**
-1. If D&A + CapEx from cashflow available → full formula
-2. Else if FCF > 0 → FCF used as proxy
-3. Else if NI > 0 → NI used as fallback
-4. If none positive → DCF section shows "insufficient data"
+1. If forecast NI, D&A, and total CapEx from cashflow are available → NI + D&A + total CapEx (CapEx is negative)
+2. Else if trailing FCF > 0 → FCF used as a current-year proxy, even when next-year revenue estimates are unavailable
+3. Else if forecast NI > 0 → NI used as a forward proxy
+4. If no positive owner-earnings proxy is available → DCF section explains which input classes are needed
+
+**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The selected growth rate is held constant through the explicit forecast period as a scenario assumption, not a forecast. When owner earnings starts with forecast year-one NI, growth starts in year 2; when it starts with trailing FCF, growth starts in year 1. Latest-year D&A/total CapEx are paired with forecast net income and working-capital changes are not included. Total CapEx is a proxy for maintenance CapEx, not an estimate of maintenance needs. The displayed starting-growth/discount sensitivity is a model scenario range, not a confidence interval.
 
 **CapEx as % of Revenue / Net Income:** two extra ratios shown alongside the Owner Earnings breakdown (Step 2), answering "how much of the top line / bottom line gets reinvested?" — a different denominator than `capex_intensity_pct` (Owner Earnings command), which divides by `NI + D&A` instead.
 
@@ -356,7 +360,7 @@ CapEx % of Net Income  = abs(capex_cf) / net_income_ttm × 100     [None if net_
 
 Thresholds reuse the existing Capital Intensity bands via the shared `analysis.capex_intensity_color()` helper: green < 25%, yellow 25–50%, red ≥ 50% — same convention as `capex_intensity_pct`, not a new scale.
 
-**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `capex_pct_revenue`, `capex_pct_net_income`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_enterprise_value`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
+**New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `capex_pct_revenue`, `capex_pct_net_income`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_base_year`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_pv_owner_earnings`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
 
 ## Earnings Growth Trend (Section 8 of `stocktool valuation`)
 
@@ -386,6 +390,33 @@ Growth is `None` for the oldest period in each list (no prior period available i
 - Growth color: green > 15%, yellow 0–15%, red < 0% — same bands as `analysis._score_growth`
 
 **New fields on `ValuationSnapshot`:** `earnings_quarters` / `earnings_years` (`list[EarningsPeriod]`, newest-first; `EarningsPeriod` = `period, revenue, net_income, margin_pct, growth_pct`), `earnings_margin_trend`, `earnings_simple_note`. Rendered as two tables (Quarterly QoQ, Annual YoY) in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_earnings_trend_card`).
+
+## Institutional Ownership & Flow (Section 9 of `stocktool valuation`)
+
+Appended automatically to every `valuation` panel, right after the Earnings Growth Trend section. Answers "who owns this stock, and are its largest holders buying or selling?"
+
+**Data fetched:** `data.fetch_institutional_ownership()` pulls `ticker.major_holders` (aggregate institutional %/insider %/institution count) and `ticker.institutional_holders` (top-10 holders by position size, each with `pctHeld`, `Value`, and `pctChange` — that holder's most recent quarter-over-quarter position change from their latest 13F filing) — one call per ticker, parallelized like the other `data.py` fetchers. Percent fields are converted from yfinance's raw fractions (×100) at fetch time, matching this project's convention elsewhere (e.g. `implied_volatility`). Never raises; returns `{}` for a ticker on any failure.
+
+**No historical ownership time series exists in yfinance** (free or otherwise) — there is no way to chart aggregate institutional ownership % over time. What *is* available and used here: each top-10 holder's single most-recent quarter-over-quarter change, from their latest 13F filing (filed quarterly, with a standard ~45-day SEC reporting lag — so this is always ~1.5-4.5 months stale, never live). This is a one-quarter snapshot of the largest holders, not a continuous flow signal — stated explicitly in the rendered caveat.
+
+**Computed in `analysis._institutional_flow_signal`:**
+
+```
+Net Institutional Flow  = Σ(holder.pct_change × holder.value) / Σ(holder.value)   [$-weighted average]
+Holders Increasing/Decreasing/Unchanged = counts by sign of holder.pct_change
+```
+
+`None` when there are no top holders, or their total value is zero (nothing to weight by) — never divides by zero.
+
+**Rating ladder (`InstitutionalFlowSignal.label`/`.color`):**
+
+| Net Flow | Label | Color |
+|----------|-------|-------|
+| > +1.0% | NET BUYING | green |
+| -1.0% to +1.0% | MIXED/FLAT | yellow |
+| < -1.0% | NET SELLING | red |
+
+**New fields on `ValuationSnapshot`:** `institutions_pct`, `insiders_pct`, `institutions_count`, `institutional_report_date` (the 13F filing date shared by all top holders), `top_institutional_holders` (`list[dict]` — `holder`, `pct_held`, `value`, `pct_change`), `institutional_flow` (`Optional[InstitutionalFlowSignal]`). Rendered as an ownership-breakdown line + top-holders table + flow verdict in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_institutional_card`).
 
 ## Quick Value Check (`stocktool value`)
 
@@ -544,7 +575,7 @@ Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks yo
 
 Discipline-enforcing tracker for LEAPS (Long-term Equity AnticiPation Securities) positions — long-dated, deep-ITM options held as a stock substitute. `leaps add` is an interactive wizard that is a checklist, not just data entry: it blocks or warns on the same rules a disciplined LEAPS trader would self-impose before committing capital to a position that can go to zero.
 
-**Scope of this implementation (MVP):** `add` (wizard), `list`, `show <id|ticker>`, `update <id|ticker>` (monitoring refresh), `remove <id|ticker>`. Core calculations include breakeven, days-to-expiry, position sizing, market-mark P&L when a valid Yahoo bid/ask midpoint is available (otherwise an explicitly labeled entry-delta estimate), signed delta-adjusted stock-equivalent exposure, an at-expiration scenario ladder, and a cross-check against the existing valuation engine. **Deferred to future phases:** Black-Scholes Greeks calculation (delta/theta are still entered manually, read off your broker's live option chain — this tool never computes delta itself), IV rank/history tracking, `leaps check` / `leaps alerts` / `leaps analyze`, email/SMTP notifications, live earnings-date fetching, and a Google Sheets backend for LEAPS.
+**Scope of this implementation (MVP):** `add` (wizard), `list`, `show <id|ticker>`, `update <id|ticker>` (monitoring refresh), `remove <id|ticker>`. Core calculations include breakeven, days-to-expiry, position sizing, market-mark P&L when a valid Yahoo bid/ask midpoint is available (otherwise an explicitly labeled entry-delta estimate), signed delta-adjusted stock-equivalent exposure, an at-expiration scenario ladder, and a cross-check against the existing valuation engine. `add`, `show`, and `update` also display a Black–Scholes delta/gamma what-if curve; broker-entered delta remains the exposure input. **Deferred to future phases:** broker Greeks integration, true historical-IV rank/percentile (would need a historical-implied-volatility data source yfinance doesn't provide — see the CHEAP/FAIR/EXPENSIVE realized-vol proxy and the self-tracked IV Rank below for what's implemented instead), historical IV-crush statistics around earnings (same data-availability limitation), `leaps check` / `leaps alerts` / `leaps analyze`, email/SMTP notifications, and a Google Sheets backend for LEAPS.
 
 **Data model (`leaps.py`):** `LeapsPosition` — `id` (8-char uuid), `ticker`, `option_type` (CALL/PUT), `strike`, `expiration`, `premium`, `contracts`, entry snapshot (`entry_date`, `entry_stock_price`, `entry_delta`/`entry_theta`/`entry_iv` — all optional), exit rules (`profit_target_multiplier`, `days_before_expiry_exit`), and close tracking (`status`, `closed_at`, `close_price`, `realized_pnl`). Dates are stored as ISO strings, not `date` objects, so the dataclass serializes with plain `dataclasses.asdict()` + `json.dump()` — no custom encoder needed.
 
@@ -572,7 +603,11 @@ Discipline-enforcing tracker for LEAPS (Long-term Equity AnticiPation Securities
 
 - **Next earnings date** — from `ticker.calendar["Earnings Date"]`, falling back to `ticker.get_earnings_dates(limit=4)` filtered to future dates. Warned if within `LEAPS_EARNINGS_WARN_DAYS` (default 21) because earnings can bring a gap and volatility changes; this is a risk reminder, not a prediction of an IV crush.
 - **Bid/ask → suggested limit price** — the exact contract's `bid`/`ask` from `ticker.option_chain(expiration)` (`.calls`/`.puts` filtered by `strike`); a valid two-sided midpoint, rounded to cents, becomes the suggested order limit. It is indicative and is not a guaranteed execution price. The quote retrieval time and spread are shown when available. A last trade is context only, never a substitute for a current mark.
-- **IV vs. 1-year realized volatility** — the contract's quoted implied volatility is compared with trailing annualized realized volatility. Show the ratio with a caveat: these are different measures and periods, so this comparison is context, not a cheap/expensive verdict or historical IV percentile.
+- **IV vs. 1-year realized volatility → CHEAP/FAIR/EXPENSIVE verdict** — `analysis.leaps_iv_value_verdict(market_iv, realized_vol)` classifies the ratio `market_iv / realized_vol` against `config.LEAPS_IV_CHEAP_RATIO` (0.90) and `LEAPS_IV_EXPENSIVE_RATIO` (1.15): ≤0.90 → CHEAP (green), ≥1.15 → EXPENSIVE (red), otherwise FAIR (yellow); either input missing → no label (dim). This is a free-data proxy for IV rank, not a true historical-IV percentile — yfinance has no historical-implied-volatility series, so trailing realized (actual) price movement stands in for "average IV". Always printed with a one-line caveat saying so. Deliberately a plain colored word, not just a ratio — this tool is aimed at beginners who need a legible reminder/signal before committing capital, not a number they have to interpret themselves.
+
+  Surfaced everywhere IV is shown, computed fresh each time (never cached): `leaps add` Step 4b (reusing `fetch_leaps_option_context`'s already-fetched realized vol), and `leaps show` / `leaps update` (which call the new standalone `data.fetch_realized_volatility(ticker)` — extracted from `fetch_leaps_option_context` so both paths share one implementation). `LeapsSnapshot` carries `realized_volatility`, `iv_value_ratio`, `iv_value_label`, `iv_value_color`, computed in `build_leaps_snapshot()` from `current_iv` (falling back to `entry_iv` if the position has never been through `leaps update`) — `None`/`"dim"` when not `ACTIVE`.
+
+  In the IV History block (`display._leaps_iv_history_lines`), only the **latest** reading gets a label, and it is computed from that reading's own stored IV value (not from `LeapsSnapshot.iv_value_label`, which reflects `current_iv`/`entry_iv` and can briefly disagree with the latest history entry right after `leaps add`, when Yahoo's seeded market IV differs from a manually-typed entry IV) — so the label always matches the number it sits next to. Older readings stay untagged: recomputing realized volatility as of a past date isn't attempted, so tagging them would look like a backtest it isn't.
 
 **Input validation (`cli._ask_float` / `cli._ask_int`):** every numeric wizard prompt (strike, premium, contracts, delta, theta, IV, portfolio value, profit target multiplier, time-stop days) goes through one of these two helpers instead of bare `FloatPrompt`/`IntPrompt`/manual `float()`. Each shows an inline example value (`[dim](e.g. 450.00)[/dim]`), strips thousands-separator commas before parsing, and on a malformed or out-of-range entry prints a red error message and **re-prompts** rather than raising an exception or calling `typer.Exit()` — a typo no longer aborts the whole wizard after several minutes of answered questions.
 
@@ -605,6 +640,10 @@ The rough P&L fallback uses **entry delta**, not current delta, across the stock
 
 **Monitoring: `stocktool leaps update <id|ticker>`** — this command records manually entered current delta/theta/IV, with PUT delta stored conventionally negative, and also fetches a best-effort Yahoo option mark/IV. A valid two-sided midpoint drives current P&L; if unavailable, the entry-delta fallback is used. Current delta does not extrapolate the full historical stock move. `leaps show` displays source/timestamps and entry vs. current Greeks. Theta is reported as a current 30-day run-rate, not an accumulated amount. No live option-Greeks feed exists in this tool.
 
+**Gamma / delta curve:** `analysis.build_leaps_gamma_curve()` calculates European Black–Scholes delta and gamma from the current stock price, strike, time to expiry, option IV, risk-free rate, and dividend yield. The terminal chart plots theoretical signed delta over stock prices from 80% to 120% of spot, marks the current spot, and reports gamma in delta points per $1 underlying move. It explains local `Δdelta ≈ gamma × Δstock`; for long puts, gamma remains positive while delta is negative, so a rising stock moves put delta toward zero. This model view is separate: broker-entered current/entry delta continues to drive exposure and existing linear scenarios.
+
+Model inputs are best-effort and recomputed per `leaps add`, `leaps show`, and `leaps update`: Yahoo option-chain IV (or clearly labeled manual current/entry IV), latest Yahoo `^TNX` close as a 10-year yield proxy (including its date), and Yahoo dividend yield. `dividendYield` is interpreted in the project's percentage-point convention; `yield` and `trailingAnnualDividendYield` are fractions converted to percent. A zero yield is accepted only when Yahoo explicitly reports zero `dividendYield` or `dividendRate=0`. Missing/invalid required inputs produce an unavailable explanation, never a guessed rate or yield. The chart holds IV, time, rates, and yield fixed across the scenario range; it is not a forecast or American-option pricing model. Gamma is local and changes along the curve.
+
 **Stock-Equivalent Exposure (the "LEAPS behaves as stock" view):** added directly from the project's own LEAPS tutorial — a deep-ITM LEAPS is deliberately used as a stock substitute on highest-conviction names, so the tool should surface *actual* market exposure, not just cash-at-risk. New `LeapsSnapshot` fields, computed in `build_leaps_snapshot()`:
 
 ```
@@ -619,6 +658,14 @@ Leverage Ratio           = |Effective Delta × current_stock_price| / current op
 
 Color thresholds: `analysis.leaps_leverage_color()` — green ≤4x (solidly stock-like), yellow 4–7x (typical deep-ITM LEAPS), red >7x (drifted into speculative, low-delta territory — recheck with `leaps update`). `analysis.leaps_exposure_color()` reuses the wizard's own `LEAPS_WARN_POSITION_PCT`/`LEAPS_MAX_POSITION_PCT` bands (3%/5%) applied to `effective_position_pct` instead of cash. `leaps list`'s summary panel flags any active position whose delta has drifted red or whose leverage has crossed 7x, so multi-position monitoring doesn't require opening each one with `leaps show`.
 
+**Vega + IV Impact:** `analysis._black_scholes_greeks()` extends the existing delta/gamma Black–Scholes helper to also return vega (textbook per-share vega for a 100-point vol move, divided by 100 for one percentage point, multiplied by 100 shares per contract — the two scalings cancel, so the raw `S × e^(-qT) × φ(d1) × √T` is already the right per-contract-per-point number). `LeapsGammaCurve.vega` carries this at the current spot alongside the existing `model_delta`/`gamma`. `analysis.LeapsVegaImpact` + `build_leaps_vega_impact(curve, position, current_iv)` turn that into dollar figures: `vega_total` (`vega × contracts`), the dollar impact of ±10/-20 IV points, and `vega_pnl_since_entry` (`vega_total × (current_iv − entry_iv)`, preferring this run's live option-chain IV, then saved current IV, then clearly flagged entry-IV fallback). Rendered by `display.render_leaps_vega_section()` right after the gamma/delta chart in `leaps show`/`leaps update`. It is a constant-vega approximation; vega changes with price, time, and IV. Not shown in `leaps add`'s wizard.
+
+**IV Rank (self-tracked history):** `analysis.leaps_iv_rank(current_iv, iv_history)` measures today's IV position as a percentage of the span from the *minimum to maximum* of this position's accumulated `iv_history`; this is a range rank, not an empirical percentile or a true 52-week range. It uses only readings captured since tracking started and returns `None` below `LEAPS_IV_RANK_MIN_READINGS` (5) readings. A 4-tier ladder — `LEAPS_IV_RANK_CHEAP_MAX`/`NORMAL_MAX`/`ELEVATED_MAX` (30/60/80) — maps to CHEAP / NORMAL / ELEVATED / EXPENSIVE. It sits alongside the CHEAP/FAIR/EXPENSIVE realized-volatility verdict above; the two use different comparisons. `leaps show` appends one `IvReading` per calendar day, deduped so repeated same-day runs don't flood the history. In the IV History block, a difference over 5 points between the entry-day reading and manually entered entry IV produces an entry-day mismatch note.
+
+**Earnings Move History:** `data.fetch_next_earnings_date(ticker)` is the earnings-date lookup used by `leaps show`/`leaps update`. `data.fetch_earnings_move_history(ticker, quarters=8)` compares the close on the last trading day before each report date to the first close strictly after it. This includes a possible after-hours reaction, but can include an extra session for before-market reports because Yahoo does not reliably identify release timing. The display labels this an earnings-window move rather than a precise post-report return. `analysis.leaps_earnings_move_stats()` summarizes absolute moves; `build_leaps_earnings_context()` combines them with effective delta for a **delta-only** scenario. It does not estimate IV crush. Rendered by `display.render_leaps_earnings_context()` after the Vega Analysis panel.
+
+**Liquidity (spread, volume, open interest):** `fetch_leaps_option_quote()` and `fetch_leaps_option_context()` now also pull `volume`/`openInterest` from the same `option_chain()` row already read for bid/ask/IV — nearly free, no new yfinance call. `analysis.leaps_liquidity_rating(spread_pct, open_interest)` rates TIGHT (green, <1% spread & >500 OI) / MODERATE (yellow, <3% & >100) / WIDE (`orange3`, <5% & >50) / ILLIQUID (red) — same 4-tier palette as IV Rank — returning `("N/A", "dim")` whenever either input is missing rather than guessing. `display.render_leaps_liquidity()` shows bid/ask/mid/spread (in $ and % of mid), a round-trip spread-cost estimate (`(ask − bid) × 100 × contracts`, labeled as an estimate, not a guaranteed execution cost), volume, open interest, and the volume/OI ratio. Not stored on `LeapsSnapshot` — passed straight from the `option_quote` dict both callers already hold.
+
 **Value-investor cross-check:** both `leaps add` (right after the ticker is approved) and `leaps show` call `cli._render_leaps_value_check()`, which reuses the *exact same engine* as `stocktool valuation` — `analysis.build_valuation_snapshot()` fed by `data.fetch_fundamentals`, `fetch_price_history` (180-day), `fetch_revenue_estimates`, `fetch_balance_sheets`, and `fetch_cashflow_basics`. It surfaces `possible_return_pct` (colored via the new `analysis.possible_return_verdict()`, mirroring the thresholds already used in `display.render_valuation`: ≥50% strong, 15–50% moderate, 0–15% limited, <0% downside) and the DCF `margin_of_safety_pct`/`iv_rating`/`iv_rating_color` fields. This is a pure cross-check, not a gate — it never blocks the wizard, it only informs. **`fetch_cashflow_basics` is required here**, not optional: without it, `build_valuation_snapshot`'s DCF step falls back to a raw `freeCashflow` proxy that can be wildly wrong (observed on AMZN: −2316% "Overvalued" instead of the correct +21.7% "Fair Value") — always fetch it alongside the other four calls for this cross-check.
 
 **Scenario Analysis (at-expiration P&L ladder):** `analysis.build_leaps_scenario()` (used by both `leaps add`'s confirmation step and `leaps show`) computes a pure-math, no-Greeks-required table of intrinsic value / P&L / return at a spread of hypothetical expiration prices, plus:
@@ -632,7 +679,7 @@ Return %         = P&L / (premium × 100 × contracts) × 100
 
 Price points are generated from a fixed set of multipliers on the current (or entry) stock price — `[0.7, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6]` for CALLs, the mirrored descending set for PUTs — plus the strike and breakeven always inserted explicitly, deduped and sorted. "Key Levels" states the 100%-loss threshold, breakeven, and the % move (with direction — "rise" for CALL, "fall" for PUT) needed to break even within the remaining days-to-expiry (shown in months). Two named "+20% / +40% move" scenarios are included as a quick gut-check.
 
-**Early-exit estimate:** starts from current stock price and the current option value (Yahoo midpoint, or a clearly labeled entry-delta estimate) and solves locally using signed current delta, falling back to entry delta. It is a rough guide that omits theta, IV, and gamma changes; PUT direction is handled by its negative delta. The accompanying "Warning Signs" panel reminds the user that IV rank is not available and restates the time-stop date (`expiration − days_before_expiry_exit`).
+**Early-exit estimate:** starts from current stock price and the current option value (Yahoo midpoint, or a clearly labeled entry-delta estimate) and solves locally using signed current delta, falling back to entry delta. It is a rough guide that omits theta, IV, and gamma changes; PUT direction is handled by its negative delta. The accompanying "Warning Signs" panel points to `leaps show`/`leaps update` for the current self-tracked IV Rank (see above) and restates the time-stop date (`expiration − days_before_expiry_exit`).
 
 **Loss-exit scenario (downside alert):** uses the same current-price/current-option-value anchor and local signed-delta approximation as the early-exit estimate, with fixed -30% and -50% option-value thresholds. It omits theta, IV, and gamma changes. Target stock levels are indicative scenarios, not price predictions.
 

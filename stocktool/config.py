@@ -53,6 +53,27 @@ LEAPS_EARNINGS_WARN_DAYS = int(os.environ.get("LEAPS_EARNINGS_WARN_DAYS", "21"))
 # where daily decay becomes materially faster. Scales to each position's own duration instead of
 # reusing the flat LEAPS_DEFAULT_TIME_STOP_DAYS day count for every contract length.
 LEAPS_DECAY_ACCELERATION_FRACTION = 1 / 3
+# IV-vs-realized-volatility "cheap/fair/expensive" ratio bands (market IV / trailing 1Y
+# realized volatility). This is a free-data proxy for IV rank — yfinance has no historical-IV
+# series, so realized (actual) volatility stands in for "average IV". Below LEAPS_IV_CHEAP_RATIO,
+# options are priced below how much the stock has actually moved; above LEAPS_IV_EXPENSIVE_RATIO,
+# you're paying a volatility premium above realized movement.
+LEAPS_IV_CHEAP_RATIO = 0.90
+LEAPS_IV_EXPENSIVE_RATIO = 1.15
+# IV Rank: current IV's position within this position's tracked min/max IV range (not an
+# empirical percentile or true 52-week range — yfinance has no historical-IV series).
+LEAPS_IV_RANK_MIN_READINGS = 5
+LEAPS_IV_RANK_CHEAP_MAX = 30
+LEAPS_IV_RANK_NORMAL_MAX = 60
+LEAPS_IV_RANK_ELEVATED_MAX = 80
+LEAPS_EARNINGS_HISTORY_QUARTERS = 8
+# Liquidity rating: spread-of-mid and open interest thresholds. Same 4-tier palette as IV Rank.
+LEAPS_LIQUIDITY_TIGHT_SPREAD_PCT = 1.0
+LEAPS_LIQUIDITY_MODERATE_SPREAD_PCT = 3.0
+LEAPS_LIQUIDITY_WIDE_SPREAD_PCT = 5.0
+LEAPS_LIQUIDITY_TIGHT_OI = 500
+LEAPS_LIQUIDITY_MODERATE_OI = 100
+LEAPS_LIQUIDITY_WIDE_OI = 50
 
 # Google Sheets settings
 CREDENTIALS_FILE = Path(

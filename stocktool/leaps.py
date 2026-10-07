@@ -51,6 +51,26 @@ class LeapsPosition:
     close_price: Optional[float] = None
     realized_pnl: Optional[float] = None
 
+    def record_iv_reading(self, iv: float, today: date, source: str, *, overwrite: bool = False) -> bool:
+        """Append one IV reading for `today`, deduped by calendar day. `today` is a parameter
+        (not `date.today()` internally) so this is testable without faking the clock.
+
+        With `overwrite=False` (the default — used by `leaps show`'s passive auto-capture),
+        a second same-day call is a no-op returning False, so repeated `leaps show` runs in
+        one day don't flood the history. With `overwrite=True` (used by `leaps update`'s
+        explicit capture), an existing same-day reading is replaced instead — an explicitly
+        entered/refreshed reading is the authoritative one for the day and must not be
+        silently dropped behind an earlier passive auto-capture from the same day.
+        """
+        today_iso = today.isoformat()
+        if self.iv_history and self.iv_history[-1].date == today_iso:
+            if not overwrite:
+                return False
+            self.iv_history[-1] = IvReading(date=today_iso, iv=iv, source=source)
+            return True
+        self.iv_history.append(IvReading(date=today_iso, iv=iv, source=source))
+        return True
+
 
 @dataclass
 class LeapsBook:
