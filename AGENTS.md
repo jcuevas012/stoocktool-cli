@@ -25,14 +25,15 @@ stocktool/
 │                   get_current_prices, fetch_revenue_estimates, fetch_balance_sheets,
 │                   fetch_sma_data, fetch_vix, fetch_etf_info, fetch_etf_performance,
 │                   compute_holdings_overlap, fetch_portfolio_etf_holdings,
-│                   fetch_owner_earnings, fetch_put_candidates
+│                   fetch_owner_earnings, fetch_put_candidates, fetch_leaps_gamma_inputs
 ├── html_report.py — Self-contained HTML report generator: generate_html_report(snapshots, output_path)
 │                   No external deps (stdlib only + existing packages). Inline CSS dark theme,
 │                   card grid layout, color-coded badges, SVG bar charts, tab-based multi-ticker nav.
 ├── analysis.py   — FundamentalSnapshot + ValuationSnapshot + ValueCheckSnapshot +
-│                   CashSecuredPutSnapshot + OwnerEarningsSnapshot dataclasses,
+│                   CashSecuredPutSnapshot + OwnerEarningsSnapshot + LeapsGammaCurve,
 │                   build_snapshot(), build_valuation_snapshot(), build_value_check_snapshot(),
-│                   build_owner_earnings_snapshot(), build_csp_snapshot(), score_ticker()
+│                   build_owner_earnings_snapshot(), build_csp_snapshot(),
+│                   build_leaps_gamma_curve(), score_ticker()
 ├── portfolio.py  — Position/Portfolio/PortfolioSnapshot dataclasses,
 │                   load/save with auto-routing (Google Sheets → JSON fallback)
 ├── sheets.py     — Google Sheets CRUD: load_portfolio_from_sheet,
@@ -40,7 +41,8 @@ stocktool/
 ├── display.py    — Rich table/panel renderers + render_pie_chart() +
 │                   render_etf_compare() + render_dip_alert() +
 │                   render_portfolio_overlap() + render_value_check() +
-│                   render_cash_secured_puts() + render_owner_earnings() (zero business logic)
+│                   render_cash_secured_puts() + render_owner_earnings() +
+│                   render_leaps_gamma_chart() (zero business logic)
 └── cli.py        — Typer app + subcommands; calls data → analysis/portfolio → display
 ```
 
@@ -168,6 +170,10 @@ LEAPS positions are stored in `~/.config/stocktool/leaps.json` (local JSON only)
 - Show quote retrieval time and last contract trade time where available. A last trade is context only and must not be substituted for a current option mark.
 - Keep theta as a current 30-day run-rate estimate (`abs(position_theta) × 30`), not cumulative historical decay. Label its assumptions.
 - Early-exit stock-price scenarios start from the current stock price and current option value, using signed current delta (or entry delta as a clearly labeled fallback). Mark them as local linear approximations that omit gamma, IV changes, and theta.
+- The LEAPS gamma chart is an educational Black–Scholes what-if, separate from manually entered broker Greeks. Use current option IV, Yahoo `^TNX` as a disclosed 10-year risk-free proxy, and a ticker dividend-yield input. Do not silently replace broker delta in exposure calculations with model delta; label fixed-input assumptions and explain gamma as local delta change per $1 underlying move.
+- If required spot, IV, rate, or dividend-yield data are unavailable or invalid, explain why the gamma chart cannot be calculated. Never silently invent a rate or dividend yield.
+- Pass a live option-chain IV reading into the same-run vega comparison when available; otherwise use saved current IV and clearly mark entry-IV fallback. Describe vega attribution since entry as a current-vega approximation.
+- Label tracked-history IV Rank as a percentage of the observed min/max range, not a statistical percentile or 52-week rank. For earnings moves, disclose the close-to-close event window and its limitations when release timing is unknown; do not imply a pure post-report return or estimate IV crush without IV data.
 - IV compared with realized volatility is context about different measures and periods, not a verdict that the option is cheap or expensive. Earnings proximity is a risk reminder, not a prediction of an IV crush.
 - Do not display a closed position's old live/theoretical P&L as realized performance. Only calculate realized P&L when a close price is recorded; otherwise show it as unavailable.
 - Never use a partial portfolio market value to claim a safe sizing percentage. If any tracked holding lacks a current price, treat the total as unavailable and ask for a manual total in the interactive add flow.
@@ -308,7 +314,7 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 
 ## DCF Intrinsic Value (Section 7 of `stocktool valuation`)
 
-Appended automatically to every `valuation` panel. Implements a 10-step Buffett Owner Earnings DCF.
+Appended automatically to every `valuation` panel. Implements a simplified 10-step Owner Earnings DCF estimate; total CapEx and latest-year cash-flow data are proxies, not a full Buffett maintenance-capital analysis.
 
 **Additional data fetched:** `fetch_cashflow_basics()` in `data.py` pulls depreciation + capex from the annual cashflow statement (same session as the other valuation fetches).
 
@@ -316,9 +322,9 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 
 | Step | Description |
 |------|-------------|
-| 1 | Normalized Net Income = Revenue Est. × Profit Margin (fallback: FCF) |
-| 2 | Owner Earnings = NI + Depreciation + CapEx (yfinance capex is negative) |
-| 3 | Growth Rate — conservative: avg(revenue_growth, eps_growth) capped by ROE tier |
+| 1 | Forecast Net Income = Next-Year Revenue Estimate × Current Profit Margin |
+| 2 | Owner Earnings proxy = NI + Depreciation + total CapEx (yfinance CapEx is negative) |
+| 3 | Growth Rate — average available revenue/EPS growth, including negative signals, capped by ROE tier; held constant as a scenario assumption; 0% if growth data is missing |
 | 4 | Discount Rate = 10% |
 | 5 | Terminal Growth = 2.5% |
 | 6 | Present Value of Owner Earnings = PV(10yr OE) + PV(Terminal Value) |
@@ -328,10 +334,11 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | 10 | Rating based on margin of safety |
 
 **Growth rate selection (in `analysis._select_dcf_growth_rate`):**
-- High-ROIC (ROE > 25%) + avg growth ≥ 10% → cap at 15%
-- Solid allocator (ROE > 15% or avg growth ≥ 8%) → cap at 12%
+- Negative growth inputs must not be discarded. Average all available revenue/EPS growth inputs; use 0% only when both are missing.
+- ROE proxy > 25% + avg growth ≥ 10% → cap at 15%
+- ROE proxy > 15% or avg growth ≥ 8% → cap at 12%
 - Mature/average → cap at 8%
-- No positive growth signals → default 4%
+- Cap extreme decline assumptions at -50% so yearly cash flows do not reverse sign from noisy growth data; disclose when this floor applies.
 
 **Rating thresholds:**
 
@@ -344,12 +351,12 @@ Appended automatically to every `valuation` panel. Implements a 10-step Buffett 
 | < 5% | ★ Overvalued |
 
 **Fallback logic for Owner Earnings:**
-1. If D&A + CapEx from cashflow available → full formula
-2. Else if FCF > 0 → FCF used as proxy
-3. Else if NI > 0 → NI used as fallback
-4. If none positive → DCF section shows "insufficient data"
+1. If forecast NI, D&A, and total CapEx from cashflow are available → NI + D&A + total CapEx (CapEx is negative)
+2. Else if trailing FCF > 0 → FCF used as a current-year proxy, even when next-year revenue estimates are unavailable
+3. Else if forecast NI > 0 → NI used as a forward proxy
+4. If no positive owner-earnings proxy is available → DCF section explains which input classes are needed
 
-**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The report names the PV and equity value accordingly. It surfaces when FCF or net income proxies are used, and notes that latest-year D&A/total CapEx are combined with forecast net income and working-capital changes are not included. A per-share sensitivity range uses growth ±2 percentage points and discount rates of 8%/12%; it is a model sensitivity, not a confidence interval.
+**Interpretation and information quality:** The DCF starts from net income, so it is an equity cash-flow method; adding cash and subtracting debt would mix it with an enterprise-value method. The report names the PV and equity value accordingly. The selected growth rate is held constant through the explicit forecast period as a scenario assumption, not a forecast. For forward owner earnings, year-one cash flow is the provided estimate and is not grown a second time before discounting; trailing FCF proxy starts from the current year and grows into year one. It notes that latest-year D&A/total CapEx are paired with forecast net income and working-capital changes are not included. Total CapEx is a proxy for maintenance CapEx, not an estimate of maintenance needs. A per-share sensitivity range uses starting growth ±2 percentage points and discount rates of 8%/12%; it is a model sensitivity, not a confidence interval.
 
 **Historical P/E context:** This valuation path does not use historical EPS. Its 6-month and 3-year values therefore use mean historical price divided by current trailing EPS and must be labeled as price/current-EPS proxies, never as historical P/E. The 3-year price data end date is shown so users can judge price-data freshness. Do not present this proxy as a decisive valuation signal without making the limitation visible.
 

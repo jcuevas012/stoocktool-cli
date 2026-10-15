@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import yfinance as yf
 
-from .config import MARGIN_STATE_FILE, ensure_config_dir
+from .config import MARGIN_STATE_FILE, LEAPS_EARNINGS_HISTORY_QUARTERS, ensure_config_dir
 
 
 def get_used_margin() -> float:
@@ -146,6 +146,56 @@ def fetch_cashflow_basics(tickers: list[str]) -> dict[str, dict]:
                 out["capex"] = capex  # negative in yfinance
         except Exception:
             pass
+        return ticker, out
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, t): t for t in tickers}
+        for future in as_completed(futures):
+            ticker, out = future.result()
+            results[ticker] = out
+
+    return results
+
+
+def fetch_institutional_ownership(tickers: list[str]) -> dict[str, dict]:
+    """Fetch institutional/insider ownership breakdown and the top-10 institutional holders
+    (each with their most recent quarter-over-quarter position change) for each ticker.
+
+    Returns {ticker: {"institutions_pct", "insiders_pct", "institutions_count", "report_date",
+    "top_holders": [{"holder", "pct_held", "value", "pct_change"}, ...]}} — percent fields are
+    already converted from yfinance's raw fractions (×100), matching this project's convention
+    elsewhere (e.g. implied_volatility). Missing/unavailable data yields {} for that ticker;
+    never raises.
+    """
+    results: dict[str, dict] = {}
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        out: dict = {}
+        try:
+            t = yf.Ticker(ticker)
+            major = t.major_holders
+            if major is not None and not major.empty:
+                if "institutionsPercentHeld" in major.index:
+                    out["institutions_pct"] = float(major.loc["institutionsPercentHeld", "Value"]) * 100
+                if "insidersPercentHeld" in major.index:
+                    out["insiders_pct"] = float(major.loc["insidersPercentHeld", "Value"]) * 100
+                if "institutionsCount" in major.index:
+                    out["institutions_count"] = int(major.loc["institutionsCount", "Value"])
+
+            holders = t.institutional_holders
+            if holders is not None and not holders.empty:
+                out["report_date"] = str(holders.iloc[0]["Date Reported"].date())
+                out["top_holders"] = [
+                    {
+                        "holder": str(row["Holder"]),
+                        "pct_held": float(row["pctHeld"]) * 100,
+                        "value": float(row["Value"]),
+                        "pct_change": float(row["pctChange"]) * 100,
+                    }
+                    for _, row in holders.iterrows()
+                ]
+        except Exception:
+            return ticker, {}
         return ticker, out
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -747,6 +797,8 @@ def fetch_leaps_option_quote(ticker: str, option_type: str, strike: float, expir
         bid = _safe_float(row.get("bid"))
         ask = _safe_float(row.get("ask"))
         iv = _safe_float(row.get("impliedVolatility"))
+        volume = _safe_float(row.get("volume"))
+        open_interest = _safe_float(row.get("openInterest"))
         last_trade = row.get("lastTradeDate")
         if bid is not None:
             result["bid"] = bid
@@ -757,11 +809,187 @@ def fetch_leaps_option_quote(ticker: str, option_type: str, strike: float, expir
             result["spread_pct"] = ((ask - bid) / ((ask + bid) / 2) * 100) if ask + bid else None
         if iv is not None:
             result["implied_volatility"] = iv * 100
+        if volume is not None:
+            result["volume"] = volume
+        if open_interest is not None:
+            result["open_interest"] = open_interest
         if last_trade is not None and hasattr(last_trade, "isoformat"):
             result["last_trade_at"] = last_trade.isoformat()
     except Exception:
         pass
     return result
+
+
+def fetch_leaps_gamma_inputs(ticker: str) -> dict:
+    """Fetch disclosed Black–Scholes rate and dividend-yield inputs for LEAPS gamma.
+
+    Yahoo's ^TNX close is used as a 10-year Treasury yield proxy. Yahoo's dividendYield
+    uses this project's documented percentage-point convention (0.39 means 0.39%);
+    the alternate `yield` and trailingAnnualDividendYield fields are fractions.
+    Missing inputs remain missing so callers can explain why the model is unavailable.
+    """
+    from datetime import datetime
+
+    result: dict = {"retrieved_at": datetime.now().astimezone().isoformat(timespec="minutes")}
+    try:
+        ticker_obj = yf.Ticker(ticker)
+    except Exception:
+        ticker_obj = None
+    try:
+        history = ticker_obj.history(period="5d") if ticker_obj is not None else None
+        if history is not None and not history.empty and "Close" in history:
+            closes = history["Close"].dropna()
+            if not closes.empty:
+                spot = _safe_float(closes.iloc[-1])
+                if spot is not None and spot > 0:
+                    result["stock_price"] = spot
+                    result["stock_price_as_of"] = closes.index[-1].date().isoformat()
+    except Exception:
+        pass
+
+    try:
+        info = ticker_obj.info if ticker_obj is not None else None
+        if isinstance(info, dict):
+            dividend_yield = _safe_float(info.get("dividendYield"))
+            if dividend_yield is not None and 0 <= dividend_yield <= 100:
+                result["dividend_yield_pct"] = dividend_yield
+                result["dividend_source"] = "Yahoo dividendYield"
+            else:
+                for key in ("yield", "trailingAnnualDividendYield"):
+                    fraction = _safe_float(info.get(key))
+                    if fraction is not None and 0 <= fraction <= 1:
+                        result["dividend_yield_pct"] = fraction * 100
+                        result["dividend_source"] = f"Yahoo {key} (fraction converted to percent)"
+                        break
+                if "dividend_yield_pct" not in result and _safe_float(info.get("dividendRate")) == 0:
+                    result["dividend_yield_pct"] = 0.0
+                    result["dividend_source"] = "Yahoo dividendRate confirms no dividend"
+    except Exception:
+        pass
+
+    try:
+        history = yf.Ticker("^TNX").history(period="5d")
+        if history is not None and not history.empty and "Close" in history:
+            closes = history["Close"].dropna()
+            if not closes.empty:
+                rate = _safe_float(closes.iloc[-1])
+                if rate is not None and -5 <= rate <= 25:
+                    result["risk_free_rate_pct"] = rate
+                    result["risk_free_source"] = "Yahoo ^TNX 10-year Treasury yield"
+                    result["risk_free_as_of"] = closes.index[-1].date().isoformat()
+    except Exception:
+        pass
+    return result
+
+
+def fetch_realized_volatility(ticker: str, period: str = "1y") -> Optional[float]:
+    """Best-effort annualized realized (historical) volatility (%) from daily log returns.
+
+    Used as a free-data proxy for "average IV" — yfinance has no historical-implied-volatility
+    series, so actual realized price movement stands in for it when judging whether a LEAPS
+    contract's current market IV looks cheap or expensive. Returns None on any failure.
+    """
+    try:
+        import numpy as np
+
+        hist = yf.Ticker(ticker).history(period=period)
+        if hist.empty or len(hist) <= 5:
+            return None
+        log_returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+        return float(log_returns.std() * (252 ** 0.5)) * 100  # fraction -> percent
+    except Exception:
+        return None
+
+
+def fetch_next_earnings_date(ticker: str) -> dict:
+    """Best-effort next earnings date lookup — standalone so `leaps show`/`leaps update` can
+    use it too, not just `leaps add`'s fetch_leaps_option_context`. Never raises.
+
+    Returns a dict with "earnings_date" (ISO) and "days_to_earnings" (int) when found, {}
+    otherwise.
+    """
+    from datetime import date, datetime
+
+    result: dict = {}
+    try:
+        t = yf.Ticker(ticker)
+        earnings_date = None
+        cal = t.calendar
+        if isinstance(cal, dict) and cal.get("Earnings Date"):
+            earnings_date = cal["Earnings Date"][0]
+        if earnings_date is None:
+            edf = t.get_earnings_dates(limit=4)
+            if edf is not None and not edf.empty:
+                future = edf[edf.index.date >= date.today()]
+                if not future.empty:
+                    earnings_date = future.index[-1].date()
+        if earnings_date is not None:
+            if isinstance(earnings_date, datetime):
+                earnings_date = earnings_date.date()
+            result["earnings_date"] = earnings_date.isoformat()
+            result["days_to_earnings"] = (earnings_date - date.today()).days
+    except Exception:
+        pass
+    return result
+
+
+def fetch_earnings_move_history(ticker: str, quarters: int = LEAPS_EARNINGS_HISTORY_QUARTERS) -> list[dict]:
+    """Best-effort earnings-window move for each of the last `quarters` reports: compare
+    the close on the last trading day strictly before the report date with the first close
+    strictly after it. This includes a possible after-hours reaction. It may also include
+    an extra session for before-market reports because yfinance timestamps do not reliably
+    distinguish release timing; this is an event window, not a pure one-day earnings return.
+
+    Returns a list of {"date": iso, "pct_move": signed %, "abs_pct_move": %}, newest last.
+    Never raises — returns [] on any failure (missing data, network error, too-short history).
+    """
+    from datetime import date
+
+    try:
+        t = yf.Ticker(ticker)
+        edf = t.get_earnings_dates(limit=quarters + 4)
+        if edf is None or edf.empty:
+            return []
+        past_dates = sorted(d.date() for d in edf.index if d.date() < date.today())
+        past_dates = past_dates[-quarters:]
+        if not past_dates:
+            return []
+
+        hist = t.history(period="3y")
+        if hist.empty or "Close" not in hist:
+            return []
+        closes = hist["Close"].dropna()
+        if len(closes) < 2:
+            return []
+        trading_days = [ts.date() for ts in closes.index]
+
+        results = []
+        for earnings_date in past_dates:
+            prior_idx = None
+            for i, d in enumerate(trading_days):
+                if d < earnings_date:
+                    prior_idx = i
+                else:
+                    break
+            after_idx = next(
+                (i for i, trading_day in enumerate(trading_days) if trading_day > earnings_date),
+                None,
+            )
+            if prior_idx is None or after_idx is None:
+                continue
+            prior_close = float(closes.iloc[prior_idx])
+            next_close = float(closes.iloc[after_idx])
+            if prior_close <= 0:
+                continue
+            pct_move = (next_close - prior_close) / prior_close * 100
+            results.append({
+                "date": earnings_date.isoformat(),
+                "pct_move": pct_move,
+                "abs_pct_move": abs(pct_move),
+            })
+        return results
+    except Exception:
+        return []
 
 
 def fetch_leaps_option_context(
@@ -775,7 +1003,7 @@ def fetch_leaps_option_context(
     that piece could not be fetched. Never raises; this is supplementary context for
     a manual-entry wizard, not a hard data requirement.
     """
-    from datetime import date, datetime
+    from datetime import datetime
 
     result: dict = {}
     t = yf.Ticker(ticker)
@@ -801,41 +1029,22 @@ def fetch_leaps_option_context(
             iv = _safe_float(row.get("impliedVolatility"))
             if iv is not None:
                 result["implied_volatility"] = iv * 100  # fraction -> percent
+            volume = _safe_float(row.get("volume"))
+            open_interest = _safe_float(row.get("openInterest"))
+            if volume is not None:
+                result["volume"] = volume
+            if open_interest is not None:
+                result["open_interest"] = open_interest
     except Exception:
         pass
 
     # Next earnings date.
-    try:
-        earnings_date = None
-        cal = t.calendar
-        if isinstance(cal, dict) and cal.get("Earnings Date"):
-            earnings_date = cal["Earnings Date"][0]
-        if earnings_date is None:
-            edf = t.get_earnings_dates(limit=4)
-            if edf is not None and not edf.empty:
-                future = edf[edf.index.date >= date.today()]
-                if not future.empty:
-                    earnings_date = future.index[-1].date()
-        if earnings_date is not None:
-            if isinstance(earnings_date, datetime):
-                earnings_date = earnings_date.date()
-            result["earnings_date"] = earnings_date.isoformat()
-            result["days_to_earnings"] = (earnings_date - date.today()).days
-    except Exception:
-        pass
+    result.update(fetch_next_earnings_date(ticker))
 
-    # 1-year realized (historical) volatility — annualized stdev of daily log returns.
-    # Proxy for "average IV": yfinance has no historical implied-volatility series.
-    try:
-        import numpy as np
-
-        hist = t.history(period="1y")
-        if not hist.empty and len(hist) > 5:
-            log_returns = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
-            realized_vol = float(log_returns.std() * (252 ** 0.5))
-            result["realized_volatility"] = realized_vol * 100  # fraction -> percent
-    except Exception:
-        pass
+    # 1-year realized (historical) volatility — proxy for "average IV".
+    realized_vol = fetch_realized_volatility(ticker, period="1y")
+    if realized_vol is not None:
+        result["realized_volatility"] = realized_vol
 
     return result
 

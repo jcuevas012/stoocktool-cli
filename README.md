@@ -86,6 +86,8 @@ stocktool portfolio show
 
 LEAPS data is stored locally in `~/.config/stocktool/leaps.json`. Active P&L uses a valid Yahoo bid/ask midpoint where available, otherwise a clearly labeled entry-delta estimate. A midpoint is indicative, not a guaranteed fill; closed P&L is realized only when a close price is recorded.
 
+`leaps add`, `leaps show`, and `leaps update` also display a Black–Scholes delta curve with gamma. The curve is an educational scenario with IV, time, risk-free rate, and dividend yield held fixed; manually entered broker delta remains the portfolio exposure input.
+
 ## Features
 
 ### Valuation Template

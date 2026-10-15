@@ -152,11 +152,11 @@ _TIPS = {
     "sma_200":          "200-day simple moving average price — a long-term trend reference.\n\n✅ Price above SMA — long-term uptrend\n🔴 Price below SMA — long-term downtrend, potential value entry point",
     "possible_return":  "Projected return if the company reaches its estimated future market cap.\nFormula: (Revenue Est × Margin × Avg PE) ÷ Current Market Cap − 1\n\n✅ > 50% — strong long-term value opportunity\n🟡 15–50% — moderate upside\n⚪ 0–15% — limited upside at current price\n🔴 Negative — projected downside",
     # ── DCF card ────────────────────────────────────────────────────────────
-    "dcf_ni":           "Normalized Net Income = Next-Year Revenue Estimate × Profit Margin.\nThe starting annual profit used to seed the DCF model.\nMore forward-looking than reported trailing net income.",
+    "dcf_ni":           "Forecast Net Income = Next-Year Revenue Estimate × Current Profit Margin.\nFor full owner-earnings inputs, this is the year-one net-income estimate used to seed the DCF model.",
     "dcf_oe":           "Owner Earnings (Buffett's definition):\nNet Income + Depreciation − Capital Expenditures\n\nCaptures the true cash generated for owners after maintaining and replacing assets.\nHigher than net income = business generates more cash than it reports (good).\nLower = heavy capex drag on reported earnings.",
     "dcf_capex_rev":    "CapEx as % of TTM Revenue = abs(CapEx) / Total Revenue × 100.\nHow much of every sales dollar gets reinvested into property, plant & equipment.\n\n✅ < 25% — capital-light\n🟡 25–50% — moderate reinvestment\n🔴 ≥ 50% — heavy capex vs. revenue",
     "dcf_capex_ni":     "CapEx as % of TTM Net Income = abs(CapEx) / Net Income × 100.\nHow much of reported profit gets absorbed by reinvestment. N/A when net income ≤ 0.\n\n✅ < 25% — capital-light\n🟡 25–50% — moderate reinvestment\n🔴 ≥ 50% — capex eats most of the profit",
-    "dcf_growth":       "Annual Owner Earnings growth rate applied for 10 years.\nDerived conservatively from trailing revenue & EPS growth, capped by ROE quality tier:\n\n✅ High-ROIC (ROE>25%): capped at 15%\n🟡 Solid allocator (ROE>15%): capped at 12%\n⚪ Average business: capped at 8%\n\nVery high trailing growth is capped to avoid unrealistic projections.",
+    "dcf_growth":       "Annual Owner Earnings growth rate used for the explicit forecast period. It is held constant as a scenario assumption, not presented as a forecast.\nDerived from available trailing revenue and EPS growth (including negative signals), capped by an ROE proxy. Very high trailing growth is capped to reduce, but not eliminate, optimistic assumptions.",
     "dcf_discount":     "Required annual return (discount rate) = 10%.\nAll future cash flows are divided by (1.10)^year to get today's equivalent value.\nBuffett benchmarks against 10% as the long-run US equity average.\nA higher rate would produce a lower (more conservative) intrinsic value.",
     "dcf_terminal":     "Perpetual growth rate assumed for all cash flows beyond year 10 = 2.5%.\nApproximates long-run nominal GDP growth. No business can outgrow the economy forever.\n\n⚠ Even a 0.5% change here meaningfully shifts terminal value — treat with skepticism.",
     "dcf_ev":           "Present value of projected Owner Earnings and terminal value. Owner Earnings starts from net income, so this model uses an equity cash-flow basis.",
@@ -755,9 +755,9 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
     if snap.dcf_owner_earnings is None:
         return """
 <div class="card" style="margin-bottom:24px">
-  <div class="card-title"><span class="card-icon">🧮</span>Intrinsic Value — DCF (Buffett Owner Earnings)</div>
+  <div class="card-title"><span class="card-icon">🧮</span>Intrinsic Value — Simplified Owner Earnings DCF</div>
   <p style="color:var(--clr-muted); font-size:.85rem">
-    Insufficient data for DCF calculation (need revenue estimate + profit margin, or positive FCF).
+    Could not establish positive owner earnings. Check forward revenue/margin and cash-flow or FCF inputs.
   </p>
 </div>"""
 
@@ -774,6 +774,9 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
     price_str = f"${snap.current_price:.2f}" if snap.current_price else "N/A"
     growth_str = f"{snap.dcf_growth_rate:.1%}" if snap.dcf_growth_rate is not None else "N/A"
     growth_note = html.escape(snap.dcf_growth_note or "")
+    if growth_note:
+        growth_start_year = snap.dcf_owner_earnings_base_year + 1
+        growth_note += f"; held constant from year {growth_start_year} through year 10 (scenario assumption)"
     oe_note = html.escape(snap.dcf_owner_earnings_note or "")
 
     capex_rev_css = color_map.get(capex_intensity_color(snap.capex_pct_revenue), "var(--clr-muted)")
@@ -783,22 +786,22 @@ def _render_dcf_card(snap: "ValuationSnapshot") -> str:
 
     return f"""
 <div class="card" style="margin-bottom:24px">
-  <div class="card-title"><span class="card-icon">🧮</span>Intrinsic Value — DCF (Buffett Owner Earnings Method)</div>
+  <div class="card-title"><span class="card-icon">🧮</span>Intrinsic Value — Simplified Owner Earnings DCF</div>
   <p style="font-size:.8rem; color:var(--clr-muted); margin-bottom:14px">
-    10-year discounted Owner Earnings model. Discount rate: {snap.dcf_discount_rate:.0%} · Terminal growth: {snap.dcf_terminal_growth:.1%}
+    10-year simplified Owner Earnings DCF; explicit-period growth is a scenario assumption. Discount rate: {snap.dcf_discount_rate:.0%} · Terminal growth: {snap.dcf_terminal_growth:.1%}
   </p>
   <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 24px">
     <div>
-      {_tr("Normalized Net Income", _fmt_large(snap.dcf_net_income), _TIPS["dcf_ni"])}
+      {_tr("Forecast Net Income", _fmt_large(snap.dcf_net_income), _TIPS["dcf_ni"])}
       {_tr("Owner Earnings", f'<span class="text-accent">{_fmt_large(snap.dcf_owner_earnings)}</span>', _TIPS["dcf_oe"])}
       <div style="font-size:.72rem; color:var(--clr-muted); margin-bottom:10px; padding-left:2px">↳ {oe_note}</div>
       {_tr("CapEx % of Revenue", f'<span style="color:{capex_rev_css}">{capex_rev_str}</span>', _TIPS["dcf_capex_rev"])}
       {_tr("CapEx % of Net Income", f'<span style="color:{capex_ni_css}">{capex_ni_str}</span>', _TIPS["dcf_capex_ni"])}
-      {_tr("Growth Rate (10yr)", f'<span class="text-yellow">{growth_str}</span>', _TIPS["dcf_growth"])}
+      {_tr("Growth Rate (Explicit Period)", f'<span class="text-yellow">{growth_str}</span>', _TIPS["dcf_growth"])}
       <div style="font-size:.72rem; color:var(--clr-muted); margin-bottom:10px; padding-left:2px">↳ {growth_note}</div>
       {_tr("Discount Rate", f'{snap.dcf_discount_rate:.0%}', _TIPS["dcf_discount"])}
       {_tr("Terminal Growth", f'{snap.dcf_terminal_growth:.1%}', _TIPS["dcf_terminal"])}
-      {_tr("PV of Owner Earnings", _fmt_large(snap.dcf_enterprise_value), _TIPS["dcf_ev"])}
+      {_tr("PV of Owner Earnings", _fmt_large(snap.dcf_pv_owner_earnings), _TIPS["dcf_ev"])}
       {_tr("Equity Value", _fmt_large(snap.dcf_equity_value), _TIPS["dcf_equity"])}
       {_tr("Data limits", html.escape(snap.dcf_data_note or "N/A"), "Owner Earnings uses approximate inputs; see data note.")}
     </div>
@@ -895,6 +898,78 @@ def _render_earnings_trend_card(snap: "ValuationSnapshot") -> str:
   {annual_table}
   {note_html}
   {trend_html}
+</div>"""
+
+
+def _render_institutional_holders_rows(holders: list[dict]) -> str:
+    rows = []
+    for h in holders:
+        change = h.get("pct_change")
+        change_css = "var(--clr-green)" if change and change > 0 else ("var(--clr-red)" if change and change < 0 else "var(--clr-muted)")
+        change_html = f'<span style="color:{change_css}">{change:+.2f}%</span>' if change is not None else '<span class="na">—</span>'
+        rows.append(
+            f'<tr><td>{html.escape(h.get("holder", "—"))}</td>'
+            f'<td style="text-align:right">{h["pct_held"]:.2f}%</td>'
+            f'<td style="text-align:right">{_fmt_large(h.get("value"))}</td>'
+            f'<td style="text-align:right">{change_html}</td></tr>'
+        )
+    return "".join(rows)
+
+
+def _render_institutional_card(snap: "ValuationSnapshot") -> str:
+    """Render the Institutional Ownership & Flow card (Section 9) for the HTML report."""
+    if snap.institutions_pct is None and not snap.top_institutional_holders:
+        return ""
+
+    owner_html = ""
+    if snap.institutions_pct is not None:
+        bits = [f"Institutional <strong>{snap.institutions_pct:.1f}%</strong>"]
+        if snap.insiders_pct is not None:
+            bits.append(f"Insider <strong>{snap.insiders_pct:.1f}%</strong>")
+        if snap.institutions_count is not None:
+            bits.append(f"<strong>{snap.institutions_count:,}</strong> institutions")
+        owner_html = f'<p style="font-size:.88rem; margin:0 0 14px">{" &nbsp;·&nbsp; ".join(bits)}</p>'
+
+    holders_table = ""
+    if snap.top_institutional_holders:
+        holders_table = f"""
+    <table style="width:100%; font-size:.78rem; border-collapse:collapse">
+      <thead><tr style="color:var(--clr-muted); text-align:left">
+        <th>Holder</th><th style="text-align:right">% Held</th><th style="text-align:right">Value</th>
+        <th style="text-align:right">Q/Q Change</th>
+      </tr></thead>
+      <tbody>{_render_institutional_holders_rows(snap.top_institutional_holders)}</tbody>
+    </table>"""
+        if snap.institutional_report_date:
+            holders_table += (
+                f'<p style="font-size:.72rem; color:var(--clr-muted); margin-top:6px">'
+                f"As of {html.escape(snap.institutional_report_date)} (most recent 13F filings)</p>"
+            )
+
+    flow = snap.institutional_flow
+    flow_html = ""
+    if flow is not None:
+        flow_css = {"NET BUYING": "var(--clr-green)", "MIXED/FLAT": "var(--clr-yellow)", "NET SELLING": "var(--clr-red)"}.get(flow.label, "var(--clr-muted)")
+        flow_html = f"""
+    <div style="margin-top:14px">
+      <span style="font-size:.72rem; color:var(--clr-muted); text-transform:uppercase; letter-spacing:.07em">Net Institutional Flow (top holders, $-weighted) </span>
+      <span style="font-weight:700; color:{flow_css}">{flow.net_flow_pct:+.2f}% → {html.escape(flow.label)}</span>
+      <p style="font-size:.78rem; color:var(--clr-muted); margin:4px 0 0">
+        {flow.holders_increasing} of {len(snap.top_institutional_holders)} top holders increased their stake,
+        {flow.holders_decreasing} decreased, {flow.holders_unchanged} unchanged
+      </p>
+    </div>
+    <p style="font-size:.72rem; color:var(--clr-muted); margin-top:8px">
+      Based on the top 10 institutional holders' most recent 13F filings (quarterly, ~45-day
+      reporting lag) — not the full institutional base, and not a continuous time series.
+    </p>"""
+
+    return f"""
+<div class="card" style="margin-bottom:24px">
+  <div class="card-title"><span class="card-icon">🏦</span>Institutional Ownership &amp; Flow</div>
+  {owner_html}
+  {holders_table}
+  {flow_html}
 </div>"""
 
 
@@ -1085,6 +1160,7 @@ def _render_valuation_section(snap: "ValuationSnapshot") -> str:
 
 {_render_dcf_card(snap)}
 {_render_earnings_trend_card(snap)}
+{_render_institutional_card(snap)}
 """
 
 

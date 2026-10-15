@@ -105,6 +105,7 @@ def valuation(
         cashflow_basics = data.fetch_cashflow_basics(tickers)
         sma_data = data.fetch_sma_data(tickers, sma_days=200)
         earnings_history = data.fetch_earnings_history(tickers)
+        institutional_ownership = data.fetch_institutional_ownership(tickers)
 
     snapshots = [
         analysis.build_valuation_snapshot(
@@ -116,6 +117,7 @@ def valuation(
             cashflow_basics.get(t, {}),
             sma_data.get(t, {}).get("sma"),
             earnings_history.get(t, {}),
+            institutional_ownership.get(t, {}),
         )
         for t in tickers
     ]
@@ -945,6 +947,12 @@ def _resolve_leaps_position(book, identifier: str):
     return matches[choice - 1]
 
 
+def _should_capture_iv_reading(position_status: str, market_iv: Optional[float]) -> bool:
+    """Guard for leaps_show's new auto-capture: only for ACTIVE positions, and only when a
+    market IV reading actually came back this run."""
+    return position_status == "ACTIVE" and market_iv is not None
+
+
 def _get_leaps_option_quote(position):
     """Fetch a current two-sided quote for one active position, if Yahoo has it."""
     if position.status != "ACTIVE":
@@ -953,6 +961,57 @@ def _get_leaps_option_quote(position):
     return data.fetch_leaps_option_quote(
         position.ticker, position.option_type, position.strike, position.expiration
     )
+
+
+def _leaps_gamma_view(position, implied_volatility, iv_source):
+    """Build an educational model curve without replacing the broker-entered delta."""
+    from . import analysis, data
+
+    inputs = data.fetch_leaps_gamma_inputs(position.ticker)
+    stock_price = inputs.get("stock_price")
+    broker_delta = position.current_delta if position.current_delta is not None else position.entry_delta
+    broker_delta_label = (
+        f"current broker reading ({position.last_updated or 'date unavailable'})"
+        if position.current_delta is not None
+        else "entry broker reading"
+    )
+    if broker_delta is not None and position.option_type == "PUT":
+        broker_delta = -abs(broker_delta)  # normalize legacy positive PUT entries for display only
+
+    missing = []
+    if stock_price is None:
+        missing.append("Yahoo underlying close")
+    if implied_volatility is None:
+        missing.append("current option IV")
+    if inputs.get("risk_free_rate_pct") is None:
+        missing.append("Yahoo ^TNX 10-year Treasury yield")
+    if inputs.get("dividend_yield_pct") is None:
+        missing.append("Yahoo ticker dividend yield")
+    if missing:
+        return None, broker_delta, broker_delta_label, "Unavailable; missing " + ", ".join(missing) + "."
+
+    rate_source = inputs.get("risk_free_source", "Yahoo ^TNX")
+    if inputs.get("risk_free_as_of"):
+        rate_source += f" as of {inputs['risk_free_as_of']}"
+    dividend_source = inputs.get("dividend_source", "Yahoo ticker dividend yield")
+    if inputs.get("retrieved_at"):
+        dividend_source += f" retrieved {inputs['retrieved_at']}"
+    curve = analysis.build_leaps_gamma_curve(
+        position,
+        stock_price,
+        implied_volatility,
+        inputs["risk_free_rate_pct"],
+        inputs["dividend_yield_pct"],
+        iv_source=iv_source,
+        risk_free_source=rate_source,
+        dividend_source=dividend_source,
+        spot_as_of=inputs.get("stock_price_as_of"),
+    )
+    if curve is None:
+        return None, broker_delta, broker_delta_label, (
+            "Unavailable; the option may be expired or a required price/IV input is not positive."
+        )
+    return curve, broker_delta, broker_delta_label, None
 
 
 @leaps_app.command("add")
@@ -1054,11 +1113,15 @@ def leaps_add() -> None:
 
     market_iv = option_context.get("implied_volatility")
     realized_vol = option_context.get("realized_volatility")
-    if market_iv is not None and realized_vol:
-        iv_ratio = market_iv / realized_vol
+    iv_label, iv_color, iv_ratio = analysis.leaps_iv_value_verdict(market_iv, realized_vol)
+    if iv_label is not None:
         console.print(
             f"Market IV: {market_iv:.1f}% vs trailing 1Y realized volatility {realized_vol:.1f}% "
-            f"({iv_ratio:.2f}x). [dim]Context only: implied and realized volatility cover different periods and include different risk premia; this is not a fair-value verdict.[/dim]"
+            f"({iv_ratio:.2f}x) → [{iv_color}]{iv_label}[/{iv_color}]"
+        )
+        console.print(
+            "[dim]Proxy signal: yfinance has no historical-IV series, so this compares IV against "
+            "realized price movement, not a true IV percentile — a reminder, not a precise verdict.[/dim]"
         )
     elif market_iv is not None:
         console.print(f"Market IV: {market_iv:.1f}% [dim](realized volatility unavailable for comparison)[/dim]")
@@ -1179,6 +1242,18 @@ def leaps_add() -> None:
         console.print(f"  Decay acceleration date: {decay_date} ({decay_desc})")
     console.print()
 
+    gamma_iv = entry_iv if entry_iv is not None else market_iv
+    if entry_iv is None and market_iv is None:
+        gamma_iv_source = "unavailable"
+    elif entry_iv is not None and (market_iv is None or abs(entry_iv - market_iv) >= 0.05):
+        gamma_iv_source = f"manual entry IV ({position.entry_date})"
+    else:
+        gamma_iv_source = f"Yahoo option chain IV (retrieved {option_context.get('quote_retrieved_at', 'time unavailable')})"
+    gamma_curve, broker_delta, broker_delta_label, gamma_unavailable = _leaps_gamma_view(
+        position, gamma_iv, gamma_iv_source
+    )
+    display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
+
     scenario = analysis.build_leaps_scenario(position, current_price)
     display.render_leaps_scenario(scenario)
 
@@ -1237,8 +1312,10 @@ def leaps_show(
     identifier: str = typer.Argument(..., help="LEAPS position id or ticker symbol."),
 ) -> None:
     """Detail view for a single LEAPS position."""
+    from datetime import date
+
     from . import data, analysis, display
-    from .leaps import load_leaps
+    from .leaps import load_leaps, save_leaps
 
     book = load_leaps()
     position = _resolve_leaps_position(book, identifier)
@@ -1249,11 +1326,47 @@ def leaps_show(
     current_price = data.get_current_prices([position.ticker]).get(position.ticker) if position.status == "ACTIVE" else None
     portfolio_value = _leaps_portfolio_value()
     option_quote = _get_leaps_option_quote(position)
-    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote)
+    realized_vol = data.fetch_realized_volatility(position.ticker) if position.status == "ACTIVE" else None
+
+    market_iv = option_quote.get("implied_volatility")
+    if _should_capture_iv_reading(position.status, market_iv):
+        if position.record_iv_reading(market_iv, date.today(), "yahoo"):
+            save_leaps(book)
+
+    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote, realized_vol)
     display.render_leaps_detail(position, snapshot)
 
     if position.status == "CLOSED":
         return
+
+    if market_iv is not None:
+        gamma_iv = market_iv
+        gamma_iv_source = f"Yahoo option chain IV (retrieved {option_quote.get('retrieved_at', 'time unavailable')})"
+    elif position.current_iv is not None:
+        gamma_iv = position.current_iv
+        if position.iv_history:
+            last_iv = position.iv_history[-1]
+            gamma_iv_source = f"saved {last_iv.source} IV from {last_iv.date}"
+        else:
+            gamma_iv_source = "saved current IV"
+    else:
+        gamma_iv, gamma_iv_source = None, "unavailable"
+    gamma_curve, broker_delta, broker_delta_label, gamma_unavailable = _leaps_gamma_view(
+        position, gamma_iv, gamma_iv_source
+    )
+    display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position, current_iv=gamma_iv)
+    display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
+    earnings_info = data.fetch_next_earnings_date(position.ticker) if position.status == "ACTIVE" else {}
+    earnings_moves = data.fetch_earnings_move_history(position.ticker) if position.status == "ACTIVE" else []
+    effective_delta = snapshot.current_delta if snapshot.current_delta is not None else snapshot.entry_delta
+    earnings_context = analysis.build_leaps_earnings_context(
+        position, current_price, effective_delta,
+        earnings_info.get("earnings_date"), earnings_info.get("days_to_earnings"),
+        earnings_moves,
+    )
+    display.render_leaps_earnings_context(earnings_context)
+    display.render_leaps_liquidity(option_quote, position.contracts)
 
     console.print()
     _render_leaps_value_check(position.ticker)
@@ -1276,7 +1389,7 @@ def leaps_update(
     from datetime import date
 
     from . import data, analysis, display
-    from .leaps import load_leaps, save_leaps, IvReading
+    from .leaps import load_leaps, save_leaps
 
     book = load_leaps()
     position = _resolve_leaps_position(book, identifier)
@@ -1345,7 +1458,7 @@ def leaps_update(
         "Current Implied Volatility (%)",
         example="32.0",
         default=market_iv if market_iv is not None else (
-            position.current_iv if position.current_iv is not None else position.entry_iv
+            position.current_iv
         ),
         optional=True,
     )
@@ -1356,14 +1469,37 @@ def leaps_update(
     position.last_updated = date.today().isoformat()
     if current_iv is not None:
         source = "yahoo" if market_iv is not None and abs(current_iv - market_iv) < 0.05 else "manual"
-        position.iv_history.append(IvReading(date=position.last_updated, iv=current_iv, source=source))
+        position.record_iv_reading(current_iv, date.today(), source, overwrite=True)
     save_leaps(book)
     console.print(f"[green]Updated {position.ticker} (id={position.id}) as of {position.last_updated}.[/green]\n")
 
     current_price = data.get_current_prices([position.ticker]).get(position.ticker)
     portfolio_value = _leaps_portfolio_value()
-    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote)
+    realized_vol = data.fetch_realized_volatility(position.ticker)
+    snapshot = analysis.build_leaps_snapshot(position, current_price, portfolio_value, option_quote, realized_vol)
     display.render_leaps_detail(position, snapshot)
+    gamma_iv = current_iv
+    gamma_iv_source = (
+        f"Yahoo option chain IV (retrieved {option_quote.get('retrieved_at', 'time unavailable')})"
+        if market_iv is not None and current_iv is not None and abs(current_iv - market_iv) < 0.05
+        else f"manually entered current IV ({position.last_updated})"
+    )
+    gamma_curve, broker_delta, broker_delta_label, gamma_unavailable = _leaps_gamma_view(
+        position, gamma_iv, gamma_iv_source
+    )
+    display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position, current_iv=gamma_iv)
+    display.render_leaps_vega_section(gamma_curve, vega_impact, gamma_unavailable)
+    earnings_info = data.fetch_next_earnings_date(position.ticker) if position.status == "ACTIVE" else {}
+    earnings_moves = data.fetch_earnings_move_history(position.ticker) if position.status == "ACTIVE" else []
+    effective_delta = snapshot.current_delta if snapshot.current_delta is not None else snapshot.entry_delta
+    earnings_context = analysis.build_leaps_earnings_context(
+        position, current_price, effective_delta,
+        earnings_info.get("earnings_date"), earnings_info.get("days_to_earnings"),
+        earnings_moves,
+    )
+    display.render_leaps_earnings_context(earnings_context)
+    display.render_leaps_liquidity(option_quote, position.contracts)
 
 
 # ---------------------------------------------------------------------------
