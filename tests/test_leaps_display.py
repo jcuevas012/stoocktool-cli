@@ -1,7 +1,7 @@
 import unittest
 
-from stocktool.analysis import LeapsSnapshot
-from stocktool.display import _leaps_iv_rank_line
+from vstock.analysis import LeapsSnapshot
+from vstock.display import _leaps_iv_rank_line
 
 
 def make_snapshot(status="ACTIVE", iv_rank_label=None, iv_rank_reading_count=0, **overrides) -> LeapsSnapshot:

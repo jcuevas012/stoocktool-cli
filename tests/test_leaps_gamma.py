@@ -4,9 +4,9 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from stocktool.analysis import _black_scholes_greeks, build_leaps_gamma_curve, build_leaps_snapshot
-from stocktool.data import fetch_leaps_gamma_inputs
-from stocktool.leaps import LeapsPosition
+from vstock.analysis import _black_scholes_greeks, build_leaps_gamma_curve, build_leaps_snapshot
+from vstock.data import fetch_leaps_gamma_inputs
+from vstock.leaps import LeapsPosition
 
 
 def make_position(option_type: str, days_to_expiry: int = 365) -> LeapsPosition:
@@ -110,14 +110,14 @@ class LeapsGammaCurveTests(unittest.TestCase):
         # d1 = (ln(100/100) + (0.04 - 0.01 + 0.5*0.3^2)*1) / (0.3*1) = 0.0750 / 0.3 = 0.25
         # phi(d1) = exp(-0.5*0.25^2) / sqrt(2*pi) = 0.38667
         # vega = 100 * exp(-0.01*1) * 0.38667 * sqrt(1) = 38.2821 (within rounding)
-        from stocktool.analysis import _black_scholes_greeks
+        from vstock.analysis import _black_scholes_greeks
 
         _, _, vega = _black_scholes_greeks("CALL", 100.0, 100.0, 1.0, 0.30, 0.04, 0.01)
 
         self.assertAlmostEqual(vega, 38.282, places=2)
 
     def test_vega_is_identical_for_call_and_put_same_strike(self):
-        from stocktool.analysis import _black_scholes_greeks
+        from vstock.analysis import _black_scholes_greeks
 
         _, _, call_vega = _black_scholes_greeks("CALL", 100.0, 100.0, 1.0, 0.30, 0.04, 0.01)
         _, _, put_vega = _black_scholes_greeks("PUT", 100.0, 100.0, 1.0, 0.30, 0.04, 0.01)
@@ -138,7 +138,7 @@ class LeapsGammaCurveTests(unittest.TestCase):
         treasury = Mock()
         treasury.history.return_value = pd.DataFrame({"Close": [4.25]}, index=[as_of])
 
-        with patch("stocktool.data.yf.Ticker", side_effect=[stock, treasury]):
+        with patch("vstock.data.yf.Ticker", side_effect=[stock, treasury]):
             inputs = fetch_leaps_gamma_inputs("TEST")
 
         self.assertEqual(inputs["stock_price"], 250.0)

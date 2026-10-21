@@ -86,9 +86,9 @@ toward underweight positions — never by selling overweight ones. Positions nat
 
 ### Monthly Buy Decision Process
 
-1. Run `stocktool portfolio rebalance` to see which positions are underweight
-2. Run `stocktool portfolio sma` to see which positions are below 200d SMA
-3. Run `stocktool strategy dip` to check VIX fear level
+1. Run `vstock portfolio rebalance` to see which positions are underweight
+2. Run `vstock portfolio sma` to see which positions are below 200d SMA
+3. Run `vstock strategy dip` to check VIX fear level
 4. **Prioritize buys** using this matrix:
 
 | Underweight? | Below SMA? | VIX > 30? | Action |
@@ -115,21 +115,21 @@ Use these commands to get **current** valuations and opportunities — don't rel
 
 ```bash
 # Monthly check: where to direct new money
-stocktool portfolio rebalance       # underweight positions = buy candidates
-stocktool portfolio sma             # below SMA = dip opportunities
-stocktool strategy dip              # VIX + combined dip signal
+vstock portfolio rebalance       # underweight positions = buy candidates
+vstock portfolio sma             # below SMA = dip opportunities
+vstock strategy dip              # VIX + combined dip signal
 
 # Quarterly deep dive: valuation health check
-stocktool valuation GOOGL MSFT AMZN NVDA AVGO META
-stocktool valuation AAPL BRK-B V UNH TSLA PLTR
+vstock valuation GOOGL MSFT AMZN NVDA AVGO META
+vstock valuation AAPL BRK-B V UNH TSLA PLTR
 
 # Periodic: check ETF redundancy
-stocktool portfolio overlap
+vstock portfolio overlap
 ```
 
 ## Valuation Guardrails
 
-When running `stocktool valuation`, use these thresholds to decide action:
+When running `vstock valuation`, use these thresholds to decide action:
 
 | Projected Return | Action |
 |:---:|--------|
@@ -144,7 +144,7 @@ When running `stocktool valuation`, use these thresholds to decide action:
 
 1. **Tech concentration (~60-65% effective)** — intentional, but a sector rotation would hit hard. The 401k (VXUS, VNQ) provides the hedge
 2. **TSLA + PLTR valuation** — combined 4% at extreme PEs. Don't let these grow beyond 5% total
-3. **QQQM overlap** — even at 12%, QQQM duplicates your individual tech holdings. Run `stocktool portfolio overlap` periodically
+3. **QQQM overlap** — even at 12%, QQQM duplicates your individual tech holdings. Run `vstock portfolio overlap` periodically
 4. **Interest rate sensitivity** — rising rates compress growth multiples. BRK-B + V + UNH provide some buffer
 5. **Single-country risk** — 100% US in this sleeve. Acceptable because 401k holds VXUS
 
@@ -152,8 +152,8 @@ When running `stocktool valuation`, use these thresholds to decide action:
 
 - **Monthly DCA:** Always buy the most underweight + below SMA position first
 - **Extra cash ($5K+):** Spread across top 2-4 underweight positions, heaviest into Tier 1
-- **When VIX > 30:** Use `stocktool strategy dip` — consider deploying margin on Tier 1 dips
-- **Quarterly review:** Run `stocktool valuation` on all holdings
+- **When VIX > 30:** Use `vstock strategy dip` — consider deploying margin on Tier 1 dips
+- **Quarterly review:** Run `vstock valuation` on all holdings
 - **Thesis broken?** If margin trend reverses 2+ quarters, stop adding. Selling is last resort
 - **New position criteria:** PE < 40x (or hyper-growth with >40% margins), strong buy consensus, below SMA preferred
 - **Only sell if:** Thesis is fundamentally broken (not just a dip), or projected return is negative for 2+ quarters

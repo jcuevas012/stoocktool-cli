@@ -2,7 +2,7 @@
 
 ## Context for Claude Code
 
-I'm building a new feature for my existing `stocktool` CLI tracker. The tool is written in Go (based on my stack: Node.js, Golang, Python, AWS CDK), uses Yahoo Finance as the data source, and already tracks my stock positions. I want to add a comprehensive LEAPS (Long-term Equity AnticiPation Securities) tracking subsystem.
+I'm building a new feature for my existing `vstock` CLI tracker. The tool is written in Go (based on my stack: Node.js, Golang, Python, AWS CDK), uses Yahoo Finance as the data source, and already tracks my stock positions. I want to add a comprehensive LEAPS (Long-term Equity AnticiPation Securities) tracking subsystem.
 
 **My context as the user:**
 - Senior backend engineer (6+ years), work remotely for TrueNorth
@@ -24,16 +24,16 @@ Build a `leaps` subcommand that:
 ## Command Structure
 
 ```bash
-stocktool leaps add              # Interactive wizard
-stocktool leaps list             # Show all active LEAPS
-stocktool leaps show <id>        # Detail view with Greeks
-stocktool leaps check            # Run exit condition checks
-stocktool leaps alerts           # Show pending notifications
-stocktool leaps remove <id>      # Close/remove position
-stocktool leaps analyze <ticker> # Pre-trade analysis (before buying)
+vstock leaps add              # Interactive wizard
+vstock leaps list             # Show all active LEAPS
+vstock leaps show <id>        # Detail view with Greeks
+vstock leaps check            # Run exit condition checks
+vstock leaps alerts           # Show pending notifications
+vstock leaps remove <id>      # Close/remove position
+vstock leaps analyze <ticker> # Pre-trade analysis (before buying)
 ```
 
-## Interactive Wizard — `stocktool leaps add`
+## Interactive Wizard — `vstock leaps add`
 
 Build a step-by-step prompt flow using survey/promptui library:
 
@@ -390,7 +390,7 @@ ACTION: Review thesis. If invalidated, close position.
 Run alerts via cron or built-in scheduler:
 ```bash
 # Cron suggestion
-0 9 * * 1-5 /path/to/stocktool leaps check --notify
+0 9 * * 1-5 /path/to/vstock leaps check --notify
 ```
 
 The `check` command should:
@@ -418,12 +418,12 @@ func shouldSendAlert(position LEAPSPosition, alertType string) bool {
 }
 ```
 
-## Pre-Trade Analysis — `stocktool leaps analyze <ticker>`
+## Pre-Trade Analysis — `vstock leaps analyze <ticker>`
 
 Before executing a real LEAPS, run analysis:
 
 ```
-$ stocktool leaps analyze AMZN
+$ vstock leaps analyze AMZN
 
 AMZN LEAPS Analysis — October 1, 2026
 =============================================
@@ -467,7 +467,7 @@ Reasons:
 
 ## Configuration File
 
-`~/.stocktool/config.yaml`:
+`~/.vstock/config.yaml`:
 ```yaml
 leaps:
   approved_tickers:
@@ -570,7 +570,7 @@ CREATE TABLE earnings_calendar (
 ## File Structure (Suggested)
 
 ```
-stocktool/
+vstock/
 ├── cmd/
 │   └── leaps/
 │       ├── add.go           # Wizard
@@ -661,7 +661,7 @@ Add these as validation in the wizard:
 ## Example Session Flow
 
 ```bash
-$ stocktool leaps add
+$ vstock leaps add
 
 LEAPS Wizard — Add New Position
 ================================
@@ -696,7 +696,7 @@ Position size: 6.87% of portfolio
 Operation cancelled. Position size too large.
 Recommended portfolio size for this trade: $130,600
 
-$ stocktool leaps analyze AMZN
+$ vstock leaps analyze AMZN
 # ... shows pre-trade analysis ...
 ```
 

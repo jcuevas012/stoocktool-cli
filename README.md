@@ -1,4 +1,4 @@
-# stocktool
+# vstock
 
 CLI tool for mid-term stock fundamental analysis and portfolio tracking. Built for investors who want quick terminal access to valuations, rebalancing signals, SMA screens, and market dip alerts.
 
@@ -13,7 +13,7 @@ cd stoocktool-cli
 pip install -e .
 
 # Or run directly without installing
-python -m stocktool.cli
+python -m vstock.cli
 ```
 
 Requires Python 3.10+.
@@ -22,19 +22,19 @@ Requires Python 3.10+.
 
 ```bash
 # Analyze a stock
-stocktool analyze AAPL MSFT --scores
+vstock analyze AAPL MSFT --scores
 
 # Build a portfolio
-stocktool portfolio add AAPL 10 182.50
-stocktool portfolio add MSFT 5 420.00
-stocktool portfolio add VOO 20 450.00 --etf
+vstock portfolio add AAPL 10 182.50
+vstock portfolio add MSFT 5 420.00
+vstock portfolio add VOO 20 450.00 --etf
 
 # Set target allocations
-stocktool portfolio target AAPL 15
-stocktool portfolio target VOO 30
+vstock portfolio target AAPL 15
+vstock portfolio target VOO 30
 
 # View your portfolio
-stocktool portfolio show
+vstock portfolio show
 ```
 
 ## Commands
@@ -43,48 +43,48 @@ stocktool portfolio show
 
 | Command | Description |
 |---------|-------------|
-| `stocktool analyze AAPL MSFT [--horizon 90] [--scores]` | Fundamental analysis table with optional color-coded scores |
-| `stocktool compare AAPL MSFT GOOGL [--horizon 60]` | Side-by-side comparison with scores |
-| `stocktool valuation AAPL MSFT GOOGL` | Full valuation template (PE, cash/debt, revenue projections, possible return) |
+| `vstock analyze AAPL MSFT [--horizon 90] [--scores]` | Fundamental analysis table with optional color-coded scores |
+| `vstock compare AAPL MSFT GOOGL [--horizon 60]` | Side-by-side comparison with scores |
+| `vstock valuation AAPL MSFT GOOGL` | Full valuation template (PE, cash/debt, revenue projections, possible return) |
 
 ### Portfolio Management
 
 | Command | Description |
 |---------|-------------|
-| `stocktool portfolio show [--no-chart]` | P&L summary, allocation, sector breakdown, pie charts |
-| `stocktool portfolio add TICKER SHARES COST [--etf]` | Add shares (weighted-average cost basis if ticker exists) |
-| `stocktool portfolio sell TICKER SHARES` | Reduce shares from a position |
-| `stocktool portfolio remove TICKER` | Remove a position entirely |
-| `stocktool portfolio target TICKER WEIGHT_PCT` | Set target allocation weight (e.g. `30` for 30%) |
-| `stocktool portfolio analyze [--horizon 90] [--scores]` | Run fundamental analysis on all portfolio tickers |
-| `stocktool portfolio rebalance` | Show buy/sell signals based on target weights |
-| `stocktool portfolio sma [--days 200]` | Screen positions against their Simple Moving Average |
-| `stocktool portfolio overlap` | Show overlap between individual stocks and ETF holdings |
-| `stocktool portfolio migrate` | Migrate local JSON portfolio to Google Sheets |
+| `vstock portfolio show [--no-chart]` | P&L summary, allocation, sector breakdown, pie charts |
+| `vstock portfolio add TICKER SHARES COST [--etf]` | Add shares (weighted-average cost basis if ticker exists) |
+| `vstock portfolio sell TICKER SHARES` | Reduce shares from a position |
+| `vstock portfolio remove TICKER` | Remove a position entirely |
+| `vstock portfolio target TICKER WEIGHT_PCT` | Set target allocation weight (e.g. `30` for 30%) |
+| `vstock portfolio analyze [--horizon 90] [--scores]` | Run fundamental analysis on all portfolio tickers |
+| `vstock portfolio rebalance` | Show buy/sell signals based on target weights |
+| `vstock portfolio sma [--days 200]` | Screen positions against their Simple Moving Average |
+| `vstock portfolio overlap` | Show overlap between individual stocks and ETF holdings |
+| `vstock portfolio migrate` | Migrate local JSON portfolio to Google Sheets |
 
 ### ETF Tools
 
 | Command | Description |
 |---------|-------------|
-| `stocktool etf compare VOO QQQM SPY` | Compare ETFs: expense ratios, performance, holdings overlap, sectors |
+| `vstock etf compare VOO QQQM SPY` | Compare ETFs: expense ratios, performance, holdings overlap, sectors |
 
 ### Strategy
 
 | Command | Description |
 |---------|-------------|
-| `stocktool strategy dip [--sma-days 200]` | Market dip alert: VIX fear gauge + margin deployment rules + SMA dip candidates |
+| `vstock strategy dip [--sma-days 200]` | Market dip alert: VIX fear gauge + margin deployment rules + SMA dip candidates |
 
 ### LEAPS Tracking
 
 | Command | Description |
 |---------|-------------|
-| `stocktool leaps add` | Guided LEAPS entry with sizing and contract checks |
-| `stocktool leaps list [--all] [--closed]` | Review active or closed LEAPS positions |
-| `stocktool leaps show ID\|TICKER` | Review position Greeks, quote provenance, P&L, and scenarios |
-| `stocktool leaps update ID\|TICKER` | Refresh manually supplied Greeks and Yahoo quote/IV |
-| `stocktool leaps remove ID\|TICKER` | Close a position and optionally record its close price |
+| `vstock leaps add` | Guided LEAPS entry with sizing and contract checks |
+| `vstock leaps list [--all] [--closed]` | Review active or closed LEAPS positions |
+| `vstock leaps show ID\|TICKER` | Review position Greeks, quote provenance, P&L, and scenarios |
+| `vstock leaps update ID\|TICKER` | Refresh manually supplied Greeks and Yahoo quote/IV |
+| `vstock leaps remove ID\|TICKER` | Close a position and optionally record its close price |
 
-LEAPS data is stored locally in `~/.config/stocktool/leaps.json`. Active P&L uses a valid Yahoo bid/ask midpoint where available, otherwise a clearly labeled entry-delta estimate. A midpoint is indicative, not a guaranteed fill; closed P&L is realized only when a close price is recorded.
+LEAPS data is stored locally in `~/.config/vstock/leaps.json`. Active P&L uses a valid Yahoo bid/ask midpoint where available, otherwise a clearly labeled entry-delta estimate. A midpoint is indicative, not a guaranteed fill; closed P&L is realized only when a close price is recorded.
 
 `leaps add`, `leaps show`, and `leaps update` also display a Black–Scholes delta curve with gamma. The curve is an educational scenario with IV, time, risk-free rate, and dividend yield held fixed; manually entered broker delta remains the portfolio exposure input.
 
@@ -152,30 +152,30 @@ Color-coded quality scores when using `--scores`:
 Two backends, auto-selected:
 
 1. **Google Sheets** (primary) — if a service account is configured
-2. **Local JSON** (fallback) — `~/.config/stocktool/portfolio.json`
+2. **Local JSON** (fallback) — `~/.config/vstock/portfolio.json`
 
 ### Google Sheets Setup
 
 ```bash
 # 1. Create a Google Cloud service account and download the JSON key
 # 2. Place the key file:
-cp ~/Downloads/your-key.json ~/.config/stocktool/credentials.json
+cp ~/Downloads/your-key.json ~/.config/vstock/credentials.json
 
 # 3. Create .env in project root:
-echo 'GOOGLE_SHEETS_CREDENTIALS_FILE=~/.config/stocktool/credentials.json' > .env
+echo 'GOOGLE_SHEETS_CREDENTIALS_FILE=~/.config/vstock/credentials.json' > .env
 echo 'GOOGLE_SHEET_ID=' >> .env
 
 # 4. First portfolio write auto-creates the sheet and saves the ID to .env
-stocktool portfolio add AAPL 10 182.50
+vstock portfolio add AAPL 10 182.50
 
 # 5. (Optional) Migrate existing JSON portfolio:
-stocktool portfolio migrate
+vstock portfolio migrate
 ```
 
 ## Architecture
 
 ```
-stocktool/
+vstock/
 ├── config.py     — Path constants, environment config, Google Sheets settings
 ├── data.py       — All yfinance I/O (fundamentals, prices, SMA, VIX, ETF data)
 ├── analysis.py   — Snapshot dataclasses, scoring, valuation logic

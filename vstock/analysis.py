@@ -1651,6 +1651,7 @@ class LeapsSnapshot:
     theoretical_pnl: Optional[float] = None
     theta_30d_run_rate: Optional[float] = None
     profit_pct: Optional[float] = None
+    annualized_return_pct: Optional[float] = None
     # --- stock-equivalent exposure (value-investor "LEAPS as stock substitute" view) ---
     effective_shares: Optional[float] = None
     effective_exposure: Optional[float] = None
@@ -1716,6 +1717,18 @@ def leaps_profit_color(profit_pct: Optional[float], profit_target_multiplier: fl
     if profit_pct >= target_pct:
         return "green"
     if profit_pct >= 0:
+        return "yellow"
+    return "red"
+
+
+def leaps_annualized_return_color(annualized_return_pct: Optional[float]) -> str:
+    """Green > +15%/yr, yellow 0-15%/yr, red < 0%/yr — same growth bands as analysis._score_growth,
+    applied to a time-annualized return instead of a reported growth rate."""
+    if annualized_return_pct is None:
+        return "dim"
+    if annualized_return_pct > 15:
+        return "green"
+    if annualized_return_pct >= 0:
         return "yellow"
     return "red"
 
@@ -1933,7 +1946,10 @@ def build_leaps_snapshot(
     days_to_expiry = (expiration_date - date.today()).days
 
     entry_date = date.fromisoformat(position.entry_date) if position.entry_date else date.today()
-    days_held = (date.today() - entry_date).days
+    held_through = (
+        date.fromisoformat(position.closed_at) if not is_active and position.closed_at else date.today()
+    )
+    days_held = (held_through - entry_date).days
 
     decay_acceleration_date, days_to_decay_acceleration = compute_leaps_decay_date(
         position.entry_date, position.expiration
@@ -1984,6 +2000,10 @@ def build_leaps_snapshot(
         theoretical_pnl = position.realized_pnl
         profit_pct = (position.realized_pnl / (premium * 100 * position.contracts) * 100
                       if premium and position.contracts else None)
+
+    # Annualizes the return already achieved against the time actually held — a 20% gain in
+    # 60 days (~122%/yr) reads very differently from the same 20% gain in 400 days (~18%/yr).
+    annualized_return_pct = profit_pct * (365 / days_held) if profit_pct is not None and days_held > 0 else None
 
     # effective_theta is the full POSITION's $/day decay (broker's Position Theta / P.Theta
     # reading, already including the 100-share multiplier and contract count) — not a per-share
@@ -2056,6 +2076,7 @@ def build_leaps_snapshot(
         theoretical_pnl=theoretical_pnl,
         theta_30d_run_rate=theta_30d_run_rate,
         profit_pct=profit_pct,
+        annualized_return_pct=annualized_return_pct,
         effective_shares=effective_shares,
         effective_exposure=effective_exposure,
         effective_position_pct=effective_position_pct,

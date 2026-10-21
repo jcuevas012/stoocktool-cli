@@ -1,8 +1,8 @@
 import unittest
 from datetime import date, timedelta
 
-from stocktool.analysis import build_leaps_scenario, build_leaps_snapshot, leaps_iv_rank
-from stocktool.leaps import IvReading, LeapsPosition
+from vstock.analysis import build_leaps_scenario, build_leaps_snapshot, leaps_iv_rank
+from vstock.leaps import IvReading, LeapsPosition
 
 
 def readings(*values: float) -> list[IvReading]:

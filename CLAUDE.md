@@ -10,15 +10,15 @@ Uses **yfinance** (no API key required), **typer** for CLI, and **rich** for ter
 ## Installation
 
 ```bash
-pip install -e .          # installs `stocktool` entry point
+pip install -e .          # installs `vstock` entry point
 # OR
-python -m stocktool.cli   # run directly without installing
+python -m vstock.cli   # run directly without installing
 ```
 
 ## Architecture
 
 ```
-stocktool/
+vstock/
 ├── config.py     — Path constants, DEFAULT_HORIZON_DAYS=90, VIX_TICKER, MARGIN_RULES,
 │                   ensure_config_dir(), dotenv loading, Google Sheets constants, sheets_configured()
 ├── data.py       — All yfinance I/O: fetch_fundamentals, fetch_price_history,
@@ -54,14 +54,14 @@ stocktool/
 Commands `analyze`, `valuation`, and `owner-earnings` accept an optional `--html [PATH]` flag.
 
 ```bash
-stocktool analyze AAPL MSFT --html
-stocktool valuation AAPL MSFT GOOGL --html
-stocktool owner-earnings AAPL MSFT --html
-stocktool analyze AAPL --html /path/to/report.html  # custom path
+vstock analyze AAPL MSFT --html
+vstock valuation AAPL MSFT GOOGL --html
+vstock owner-earnings AAPL MSFT --html
+vstock analyze AAPL --html /path/to/report.html  # custom path
 ```
 
 **Behavior:**
-- When `--html` is provided without a path, the report is saved to `~/.config/stocktool/report_<TICKERS>_<DATE>.html`
+- When `--html` is provided without a path, the report is saved to `~/.config/vstock/report_<TICKERS>_<DATE>.html`
 - The file is opened automatically in the default browser after generation
 - Terminal Rich output is still rendered normally alongside the HTML export
 
@@ -79,13 +79,13 @@ stocktool analyze AAPL --html /path/to/report.html  # custom path
 Two backends, auto-selected:
 
 1. **Google Sheets** (primary, if configured) — positions stored in a shared spreadsheet.
-   - Requires a Google Cloud service account JSON at `~/.config/stocktool/credentials.json`
+   - Requires a Google Cloud service account JSON at `~/.config/vstock/credentials.json`
    - Sheet ID stored in `.env` at project root (`GOOGLE_SHEET_ID`)
    - On first write, a new spreadsheet is created and the ID is saved to `.env`
    - Sheet layout: `ticker | shares | cost_basis | target_weight | is_etf` (header row 1, data from row 2)
-   - Use `stocktool portfolio migrate` to copy local JSON → Google Sheets
+   - Use `vstock portfolio migrate` to copy local JSON → Google Sheets
 
-2. **Local JSON** (fallback) — `~/.config/stocktool/portfolio.json`
+2. **Local JSON** (fallback) — `~/.config/vstock/portfolio.json`
    - Used automatically if credentials file doesn't exist
 
 Never store computed/live data — only: ticker, shares, cost_basis, target_weight, is_etf.
@@ -95,19 +95,19 @@ Never store computed/live data — only: ticker, shares, cost_basis, target_weig
 ```bash
 # 1. Create a Google Cloud service account and download the JSON key
 # 2. Place the key file:
-cp ~/Downloads/your-key.json ~/.config/stocktool/credentials.json
+cp ~/Downloads/your-key.json ~/.config/vstock/credentials.json
 # 3. Create .env in project root (or use the template):
-echo 'GOOGLE_SHEETS_CREDENTIALS_FILE=~/.config/stocktool/credentials.json' > .env
+echo 'GOOGLE_SHEETS_CREDENTIALS_FILE=~/.config/vstock/credentials.json' > .env
 echo 'GOOGLE_SHEET_ID=' >> .env
 # 4. First portfolio write auto-creates the sheet and saves the ID to .env
-stocktool portfolio add AAPL 10 182.50
+vstock portfolio add AAPL 10 182.50
 # 5. (Optional) Migrate existing JSON portfolio:
-stocktool portfolio migrate
+vstock portfolio migrate
 ```
 
 ### FMP Setup (optional)
 
-Only needed for `stocktool etf valuation`'s true 5-year historical average P/E — the command works fully without it.
+Only needed for `vstock etf valuation`'s true 5-year historical average P/E — the command works fully without it.
 
 ```bash
 # 1. Get a free key at financialmodelingprep.com (250 requests/day free tier)
@@ -129,46 +129,46 @@ echo 'FMP_API_KEY=' >> .env
 - ETF top holdings: use `ticker.funds_data.top_holdings` (returns DataFrame with Symbol index, `"Name"` and `"Holding Percent"` columns). The `.info["holdings"]` key is no longer populated by yfinance.
 - `funds_data.top_holdings`'s `"Holding Percent"` column is a true fraction (0.08 = 8%), not a decimal-percentage — unlike `dividendYield` above.
 - `annualReportExpenseRatio` and `trailingAnnualDividendYield` are no longer populated for most ETFs. Use `netExpenseRatio` and `dividendYield` instead — both are "decimal percentage" fields (0.03 = 0.03%, 1.07 = 1.07%) like `dividendYield` above, so divide by 100 to store as a true fraction if that's your field's convention.
-- ETFs often lack `currentPrice` in `.info` (populated as `regularMarketPrice`/`previousClose` instead, or not at all). `stocktool etf valuation` sidesteps this by sourcing current price from price-history close throughout, rather than from `.info`.
+- ETFs often lack `currentPrice` in `.info` (populated as `regularMarketPrice`/`previousClose` instead, or not at all). `vstock etf valuation` sidesteps this by sourcing current price from price-history close throughout, rather than from `.info`.
 - Per-stock `earningsGrowth` is a noisy trailing YoY figure that can spike to 1000%+ off a near-zero prior-year base (e.g. a cyclical semiconductor coming out of a down year) — clip/cap it before using in any weighted or aggregate calculation.
 - `ticker.quarterly_earnings` is deprecated and returns `None` in current yfinance — use `ticker.quarterly_income_stmt` / `ticker.income_stmt` (`"Total Revenue"`, `"Net Income"` rows) instead. `quarterly_income_stmt` only returns the trailing ~5 quarters (not a full 8-quarter YoY-by-quarter window).
 
 ## Commands
 
 ```bash
-stocktool analyze AAPL MSFT [--horizon 90] [--scores]
-stocktool compare AAPL MSFT GOOGL [--horizon 60]
-stocktool valuation AAPL MSFT GOOGL
-stocktool value AAPL MSFT GOOGL
-stocktool owner-earnings AAPL MSFT GOOGL
-stocktool portfolio show [--horizon 90] [--no-chart]
-stocktool portfolio add TICKER SHARES COST_PER_SHARE [--etf]
-stocktool portfolio sell TICKER SHARES
-stocktool portfolio remove TICKER
-stocktool portfolio target TICKER WEIGHT_PCT
-stocktool portfolio analyze [--horizon 90] [--scores]
-stocktool portfolio rebalance
-stocktool portfolio sma [--days 200]
-stocktool portfolio overlap
-stocktool portfolio migrate
-stocktool etf compare VOO QQQM SPY
-stocktool etf valuation VOO QQQM [--html]
-stocktool strategy dip [--sma-days 200]
-stocktool strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
-stocktool strategy margin [AMOUNT] [--reset]
-stocktool leaps add
-stocktool leaps list [--all] [--closed]
-stocktool leaps show ID|TICKER
-stocktool leaps update ID|TICKER
-stocktool leaps remove ID|TICKER
-stocktool docs
+vstock analyze AAPL MSFT [--horizon 90] [--scores]
+vstock compare AAPL MSFT GOOGL [--horizon 60]
+vstock valuation AAPL MSFT GOOGL
+vstock value AAPL MSFT GOOGL
+vstock owner-earnings AAPL MSFT GOOGL
+vstock portfolio show [--horizon 90] [--no-chart]
+vstock portfolio add TICKER SHARES COST_PER_SHARE [--etf]
+vstock portfolio sell TICKER SHARES
+vstock portfolio remove TICKER
+vstock portfolio target TICKER WEIGHT_PCT
+vstock portfolio analyze [--horizon 90] [--scores]
+vstock portfolio rebalance
+vstock portfolio sma [--days 200]
+vstock portfolio overlap
+vstock portfolio migrate
+vstock etf compare VOO QQQM SPY
+vstock etf valuation VOO QQQM [--html]
+vstock strategy dip [--sma-days 200]
+vstock strategy puts [--min-dte 30] [--max-dte 45] [--otm 5.0]
+vstock strategy margin [AMOUNT] [--reset]
+vstock leaps add
+vstock leaps list [--all] [--closed]
+vstock leaps show ID|TICKER
+vstock leaps update ID|TICKER
+vstock leaps remove ID|TICKER
+vstock docs
 ```
 
 ## ETF Support
 
 ### `--etf` flag
 
-Use `stocktool portfolio add TICKER SHARES COST --etf` to mark a position as an ETF.
+Use `vstock portfolio add TICKER SHARES COST --etf` to mark a position as an ETF.
 The `is_etf` flag is stored in the Google Sheet and local JSON.
 
 ### Type grouping in `portfolio show`
@@ -180,7 +180,7 @@ When the portfolio has both ETFs and individual stocks:
 - **Type Breakdown** table shows ETF vs Stock total weights
 - **Pie chart** includes a third chart: ETF vs Stock split
 
-### `stocktool etf compare` command
+### `vstock etf compare` command
 
 Compares 2+ ETFs side-by-side:
 
@@ -192,9 +192,9 @@ Compares 2+ ETFs side-by-side:
 
 **Note:** yfinance ETF data varies — expense ratio, holdings, and sector weights may show N/A for some ETFs. Holdings overlap is based on top reported holdings only (not full fund composition).
 
-## ETF Valuation (`stocktool etf valuation`)
+## ETF Valuation (`vstock etf valuation`)
 
-Value-investing template for ETFs: PEGY ratio, P/E-reversion fair value, margin of safety, a 5-year growth projection, and two disciplined entry price tiers. Mirrors the visual style of `stocktool valuation` (same Rich Panel conventions, same `Valuación de Activos: {TICKER}` title).
+Value-investing template for ETFs: PEGY ratio, P/E-reversion fair value, margin of safety, a 5-year growth projection, and two disciplined entry price tiers. Mirrors the visual style of `vstock valuation` (same Rich Panel conventions, same `Valuación de Activos: {TICKER}` title).
 
 **Data fetched:** ETF `.info` (via `fetch_etf_info`, extended with `trailing_pe`/`forward_pe`/`category`) + top-10 holdings via `funds_data.top_holdings` (`fetch_portfolio_etf_holdings`) + per-holding `.info` for PE/growth (`fetch_holding_fundamentals`) + 5-year price history for EMA-50/SMA-200/52w-hi-lo/proxy average price (`fetch_etf_technicals`) + optional Financial Modeling Prep call for true 5-year average P/E (`fmp.fetch_historical_pe`).
 
@@ -242,22 +242,22 @@ The "Hold/Neutral" rule isn't in the original spec — it fills a real gap in th
 
 ### Financial Modeling Prep (FMP) integration — optional
 
-yfinance has no field for a true multi-year historical average P/E, which the Fair Value / Margin of Safety / 5-Year Projection formulas above all depend on. `stocktool etf valuation` optionally calls **Financial Modeling Prep** for this one field:
+yfinance has no field for a true multi-year historical average P/E, which the Fair Value / Margin of Safety / 5-Year Projection formulas above all depend on. `vstock etf valuation` optionally calls **Financial Modeling Prep** for this one field:
 
 - Set `FMP_API_KEY=...` in `.env` (get a free key at financialmodelingprep.com) to enable it. Omit it entirely — the command works fully without it.
 - Endpoint: `GET https://financialmodelingprep.com/stable/ratios?symbol={TICKER}&period=annual&limit=5&apikey={KEY}`, called **at most once per ETF ticker** (not per holding), to stay well within the free tier's 250 requests/day.
 - The exact P/E field name in FMP's response could not be verified against live documentation (the docs site blocks automated fetching) — `fmp.py` tries several candidate field names defensively (`priceToEarningsRatio`, `peRatio`, `priceEarningsRatio`) and falls back to the proxy below if none resolve. Re-verify with a real API key if FMP changes its schema.
 - **Fallback proxy** (used automatically with no key, on any API failure, or on a rate limit): `5Y Avg P/E ≈ mean(5-year price) × (current Trailing P/E / current Price)` — assumes the basket's aggregate earnings are roughly stable over the window. The `hist_pe_note` field on `ETFValuationSnapshot` always states which source was used.
 
-## Pie Chart (`stocktool portfolio show`)
+## Pie Chart (`vstock portfolio show`)
 
 `portfolio show` now renders allocation charts after the summary tables:
 
 - **Terminal:** Horizontal bar charts (ticker allocation + sector allocation) using rich
-- **PNG:** Matplotlib pie charts saved to `~/.config/stocktool/portfolio_allocation.png`
+- **PNG:** Matplotlib pie charts saved to `~/.config/vstock/portfolio_allocation.png`
 - Use `--no-chart` to skip chart rendering
 
-## Valuation Command (`stocktool valuation`)
+## Valuation Command (`vstock valuation`)
 
 Full value-investing analysis template. Designed for 5+ year positions.
 Fetches: `.info` fundamentals + 3-year price history (also sliced for the 6-month avg PE) + analyst revenue estimates + balance sheet + 1-year price history for the 200-day SMA.
@@ -303,7 +303,7 @@ Possible Return    = (Future Market Cap / Current Market Cap) - 1
 - 0–15% → Limited upside at current price
 - < 0% → Projected downside — re-evaluate
 
-## DCF Intrinsic Value (Section 7 of `stocktool valuation`)
+## DCF Intrinsic Value (Section 7 of `vstock valuation`)
 
 Appended automatically to every `valuation` panel. Implements a simplified 10-step Owner Earnings DCF estimate; total CapEx and latest-year cash-flow data are proxies, not a full Buffett maintenance-capital analysis.
 
@@ -362,7 +362,7 @@ Thresholds reuse the existing Capital Intensity bands via the shared `analysis.c
 
 **New fields on `ValuationSnapshot`:** `shares_outstanding`, `revenue_growth`, `eps_growth`, `roe`, `roa`, `free_cashflow`, `depreciation`, `capex_cf`, `capex_pct_revenue`, `capex_pct_net_income`, `dcf_net_income`, `dcf_owner_earnings`, `dcf_owner_earnings_base_year`, `dcf_owner_earnings_note`, `dcf_growth_rate`, `dcf_growth_note`, `dcf_discount_rate`, `dcf_terminal_growth`, `dcf_pv_owner_earnings`, `dcf_equity_value`, `intrinsic_value_per_share`, `margin_of_safety_pct`, `iv_rating`, `iv_rating_color`.
 
-## Earnings Growth Trend (Section 8 of `stocktool valuation`)
+## Earnings Growth Trend (Section 8 of `vstock valuation`)
 
 Appended automatically to every `valuation` panel, right after the DCF section. Answers a simple question in plain numbers: how much of each quarter's/year's revenue actually becomes profit, and is that improving?
 
@@ -391,7 +391,7 @@ Growth is `None` for the oldest period in each list (no prior period available i
 
 **New fields on `ValuationSnapshot`:** `earnings_quarters` / `earnings_years` (`list[EarningsPeriod]`, newest-first; `EarningsPeriod` = `period, revenue, net_income, margin_pct, growth_pct`), `earnings_margin_trend`, `earnings_simple_note`. Rendered as two tables (Quarterly QoQ, Annual YoY) in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_earnings_trend_card`).
 
-## Institutional Ownership & Flow (Section 9 of `stocktool valuation`)
+## Institutional Ownership & Flow (Section 9 of `vstock valuation`)
 
 Appended automatically to every `valuation` panel, right after the Earnings Growth Trend section. Answers "who owns this stock, and are its largest holders buying or selling?"
 
@@ -418,7 +418,7 @@ Holders Increasing/Decreasing/Unchanged = counts by sign of holder.pct_change
 
 **New fields on `ValuationSnapshot`:** `institutions_pct`, `insiders_pct`, `institutions_count`, `institutional_report_date` (the 13F filing date shared by all top holders), `top_institutional_holders` (`list[dict]` — `holder`, `pct_held`, `value`, `pct_change`), `institutional_flow` (`Optional[InstitutionalFlowSignal]`). Rendered as an ownership-breakdown line + top-holders table + flow verdict in both the Rich panel (`display._render_one_valuation`) and the HTML report (`html_report._render_institutional_card`).
 
-## Quick Value Check (`stocktool value`)
+## Quick Value Check (`vstock value`)
 
 Quick-reference command for value investors. Shows P/E, P/B, and P/FCF ratios with color-coded thresholds and hint text.
 
@@ -432,7 +432,7 @@ Quick-reference command for value investors. Shows P/E, P/B, and P/FCF ratios wi
 
 P/FCF is computed as `marketCap / freeCashflow` from `.info` fields.
 
-## Owner Earnings (`stocktool owner-earnings`)
+## Owner Earnings (`vstock owner-earnings`)
 
 Buffett's preferred measure of true profitability. Unlike reported net income, Owner Earnings
 shows the actual cash a business generates for its owners after maintaining operations.
@@ -472,7 +472,7 @@ is rendered after the individual panels with a "What it means" column in plain E
 bridge — once built, the cash just flows in" for low capital intensity). No financial jargon
 without an explanation.
 
-## SMA Screen (`stocktool portfolio sma`)
+## SMA Screen (`vstock portfolio sma`)
 
 Screens all portfolio positions against their Simple Moving Average (default 200-day).
 Highlights positions trading **below** the SMA — potential buying opportunities for value investors.
@@ -480,9 +480,9 @@ Highlights positions trading **below** the SMA — potential buying opportunitie
 - Fetches 1 year of price history via `yf.download()`, computes rolling mean
 - Sorts results: BELOW SMA first (opportunities), then ABOVE SMA
 - `--days` flag overrides the SMA window (e.g. `--days 50` for 50-day SMA)
-- Summary panel lists flagged tickers and suggests `stocktool valuation` for deeper analysis
+- Summary panel lists flagged tickers and suggests `vstock valuation` for deeper analysis
 
-## Portfolio Overlap (`stocktool portfolio overlap`)
+## Portfolio Overlap (`vstock portfolio overlap`)
 
 Shows overlap between individual stocks and ETF holdings in the portfolio.
 Identifies stocks held both directly and indirectly through ETFs.
@@ -498,7 +498,7 @@ Identifies stocks held both directly and indirectly through ETFs.
 
 **Note:** Based on top holdings reported by yfinance (not full fund composition). ETFs without holdings data are listed separately.
 
-## Market Dip Alert (`stocktool strategy dip`)
+## Market Dip Alert (`vstock strategy dip`)
 
 Combines the CBOE VIX (fear index) with SMA screening to help decide when and how much margin to deploy during market dips.
 
@@ -525,7 +525,7 @@ Combines the CBOE VIX (fear index) with SMA screening to help decide when and ho
 3. **Dip Candidates** — Portfolio positions trading below SMA
 4. **Strategy Summary** — Combined signal in one line
 
-## Cash-Secured Put Screener (`stocktool strategy puts`)
+## Cash-Secured Put Screener (`vstock strategy puts`)
 
 Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks you'd happily own for 5-10 years. If assigned, you buy a great company at a discount while collecting premium.
 
@@ -571,7 +571,7 @@ Buffett-style put-selling screener for portfolio stocks. Sells puts on stocks yo
 - Return: green >= 2%, yellow 1-2%, dim < 1%
 - Annualized: green >= 12%, yellow 6-12%, dim < 6%
 
-## LEAPS Tracking (`stocktool leaps`)
+## LEAPS Tracking (`vstock leaps`)
 
 Discipline-enforcing tracker for LEAPS (Long-term Equity AnticiPation Securities) positions — long-dated, deep-ITM options held as a stock substitute. `leaps add` is an interactive wizard that is a checklist, not just data entry: it blocks or warns on the same rules a disciplined LEAPS trader would self-impose before committing capital to a position that can go to zero.
 
@@ -579,7 +579,7 @@ Discipline-enforcing tracker for LEAPS (Long-term Equity AnticiPation Securities
 
 **Data model (`leaps.py`):** `LeapsPosition` — `id` (8-char uuid), `ticker`, `option_type` (CALL/PUT), `strike`, `expiration`, `premium`, `contracts`, entry snapshot (`entry_date`, `entry_stock_price`, `entry_delta`/`entry_theta`/`entry_iv` — all optional), exit rules (`profit_target_multiplier`, `days_before_expiry_exit`), and close tracking (`status`, `closed_at`, `close_price`, `realized_pnl`). Dates are stored as ISO strings, not `date` objects, so the dataclass serializes with plain `dataclasses.asdict()` + `json.dump()` — no custom encoder needed.
 
-**Persistence:** local JSON only at `~/.config/stocktool/leaps.json` (`load_leaps()`/`save_leaps()`). Unlike `portfolio.py`, there is **no Google Sheets routing** for LEAPS — a deliberate simplification for this MVP, not an oversight.
+**Persistence:** local JSON only at `~/.config/vstock/leaps.json` (`load_leaps()`/`save_leaps()`). Unlike `portfolio.py`, there is **no Google Sheets routing** for LEAPS — a deliberate simplification for this MVP, not an oversight.
 
 **`leaps remove` closes, it doesn't delete** — status flips to CLOSED (optionally recording a close price and realized P&L) so closed positions remain visible via `leaps list --closed` / `--all`. This preserves a track record of past LEAPS trades. Closing an already-closed position is a no-op, not an error.
 
@@ -638,7 +638,7 @@ The rough P&L fallback uses **entry delta**, not current delta, across the stock
 
 **Color thresholds:** Days-to-expiry — red once inside the 90-day default time-stop window (`LEAPS_DEFAULT_TIME_STOP_DAYS`), else green. Profit % — green at/above the position's profit target (`(profit_target_multiplier - 1) × 100`), yellow while positive but below target, red when negative. Delta (`analysis.leaps_delta_color()`) — green in the 0.75–0.85 sweet spot, yellow in the 0.70–0.90 warn band outside that spot, red/dim otherwise.
 
-**Monitoring: `stocktool leaps update <id|ticker>`** — this command records manually entered current delta/theta/IV, with PUT delta stored conventionally negative, and also fetches a best-effort Yahoo option mark/IV. A valid two-sided midpoint drives current P&L; if unavailable, the entry-delta fallback is used. Current delta does not extrapolate the full historical stock move. `leaps show` displays source/timestamps and entry vs. current Greeks. Theta is reported as a current 30-day run-rate, not an accumulated amount. No live option-Greeks feed exists in this tool.
+**Monitoring: `vstock leaps update <id|ticker>`** — this command records manually entered current delta/theta/IV, with PUT delta stored conventionally negative, and also fetches a best-effort Yahoo option mark/IV. A valid two-sided midpoint drives current P&L; if unavailable, the entry-delta fallback is used. Current delta does not extrapolate the full historical stock move. `leaps show` displays source/timestamps and entry vs. current Greeks. Theta is reported as a current 30-day run-rate, not an accumulated amount. No live option-Greeks feed exists in this tool.
 
 **Gamma / delta curve:** `analysis.build_leaps_gamma_curve()` calculates European Black–Scholes delta and gamma from the current stock price, strike, time to expiry, option IV, risk-free rate, and dividend yield. The terminal chart plots theoretical signed delta over stock prices from 80% to 120% of spot, marks the current spot, and reports gamma in delta points per $1 underlying move. It explains local `Δdelta ≈ gamma × Δstock`; for long puts, gamma remains positive while delta is negative, so a rising stock moves put delta toward zero. This model view is separate: broker-entered current/entry delta continues to drive exposure and existing linear scenarios.
 
@@ -666,7 +666,7 @@ Color thresholds: `analysis.leaps_leverage_color()` — green ≤4x (solidly sto
 
 **Liquidity (spread, volume, open interest):** `fetch_leaps_option_quote()` and `fetch_leaps_option_context()` now also pull `volume`/`openInterest` from the same `option_chain()` row already read for bid/ask/IV — nearly free, no new yfinance call. `analysis.leaps_liquidity_rating(spread_pct, open_interest)` rates TIGHT (green, <1% spread & >500 OI) / MODERATE (yellow, <3% & >100) / WIDE (`orange3`, <5% & >50) / ILLIQUID (red) — same 4-tier palette as IV Rank — returning `("N/A", "dim")` whenever either input is missing rather than guessing. `display.render_leaps_liquidity()` shows bid/ask/mid/spread (in $ and % of mid), a round-trip spread-cost estimate (`(ask − bid) × 100 × contracts`, labeled as an estimate, not a guaranteed execution cost), volume, open interest, and the volume/OI ratio. Not stored on `LeapsSnapshot` — passed straight from the `option_quote` dict both callers already hold.
 
-**Value-investor cross-check:** both `leaps add` (right after the ticker is approved) and `leaps show` call `cli._render_leaps_value_check()`, which reuses the *exact same engine* as `stocktool valuation` — `analysis.build_valuation_snapshot()` fed by `data.fetch_fundamentals`, `fetch_price_history` (180-day), `fetch_revenue_estimates`, `fetch_balance_sheets`, and `fetch_cashflow_basics`. It surfaces `possible_return_pct` (colored via the new `analysis.possible_return_verdict()`, mirroring the thresholds already used in `display.render_valuation`: ≥50% strong, 15–50% moderate, 0–15% limited, <0% downside) and the DCF `margin_of_safety_pct`/`iv_rating`/`iv_rating_color` fields. This is a pure cross-check, not a gate — it never blocks the wizard, it only informs. **`fetch_cashflow_basics` is required here**, not optional: without it, `build_valuation_snapshot`'s DCF step falls back to a raw `freeCashflow` proxy that can be wildly wrong (observed on AMZN: −2316% "Overvalued" instead of the correct +21.7% "Fair Value") — always fetch it alongside the other four calls for this cross-check.
+**Value-investor cross-check:** both `leaps add` (right after the ticker is approved) and `leaps show` call `cli._render_leaps_value_check()`, which reuses the *exact same engine* as `vstock valuation` — `analysis.build_valuation_snapshot()` fed by `data.fetch_fundamentals`, `fetch_price_history` (180-day), `fetch_revenue_estimates`, `fetch_balance_sheets`, and `fetch_cashflow_basics`. It surfaces `possible_return_pct` (colored via the new `analysis.possible_return_verdict()`, mirroring the thresholds already used in `display.render_valuation`: ≥50% strong, 15–50% moderate, 0–15% limited, <0% downside) and the DCF `margin_of_safety_pct`/`iv_rating`/`iv_rating_color` fields. This is a pure cross-check, not a gate — it never blocks the wizard, it only informs. **`fetch_cashflow_basics` is required here**, not optional: without it, `build_valuation_snapshot`'s DCF step falls back to a raw `freeCashflow` proxy that can be wildly wrong (observed on AMZN: −2316% "Overvalued" instead of the correct +21.7% "Fair Value") — always fetch it alongside the other four calls for this cross-check.
 
 **Scenario Analysis (at-expiration P&L ladder):** `analysis.build_leaps_scenario()` (used by both `leaps add`'s confirmation step and `leaps show`) computes a pure-math, no-Greeks-required table of intrinsic value / P&L / return at a spread of hypothetical expiration prices, plus:
 
@@ -693,6 +693,20 @@ Decay Acceleration    = expiration − (Total Life × LEAPS_DECAY_ACCELERATION_F
 `analysis.compute_leaps_decay_date(entry_date, expiration)` is the single source of this formula — returns `(decay_acceleration_date, days_to_decay_acceleration)`, called from `build_leaps_snapshot()` (populates `LeapsSnapshot.decay_acceleration_date` / `days_to_decay_acceleration`) and directly from `leaps add`'s confirmation step (no snapshot exists yet at that point in the wizard). Falls back to treating today as the start of life if `entry_date` is missing, mirroring `days_held`'s own fallback.
 
 **Color/surfacing:** `analysis.leaps_decay_color()` is binary — red once `days_to_decay_acceleration <= 0`, else green — same pattern as `leaps_dte_color()`. Rendered in three places: a line in `render_leaps_detail()`'s Computed section ("N days of slow decay left" / "passed N days ago — theta now eroding faster each week"), a summary flag in `render_leaps_list()` ("In accelerated decay zone: TICKER") alongside the existing time-stop/delta-drift/leverage flags, and a line in `leaps add`'s confirmation Summary printed right after the exit-rule line.
+
+**Entry Date & Annualized Return (`leaps list` / `leaps show`):** a 20% gain reads very differently after 60 days than after 400 days, so the entry date and a time-normalized return are surfaced alongside the raw Profit %, not just in the detail view.
+
+```
+Annualized Return % = Profit % × (365 / Days Held)   [None if Days Held <= 0 or Profit % unavailable]
+```
+
+`days_held` (`build_leaps_snapshot()`) anchors on `position.closed_at` for CLOSED positions (falling back to today only while the position is still ACTIVE or has no close date) so a closed position's annualization doesn't keep growing after the position was actually closed. `LeapsSnapshot.annualized_return_pct` is computed once here and consumed by both `leaps list` and `leaps show` — no duplicate formula.
+
+**Cost Basis column (`leaps list`):** the existing "Premium" column is the per-share quoted contract price (`snap.premium`), which doesn't by itself answer "how much cash did I actually put into this?" — a separate "Cost Basis" column computes `premium × 100 × contracts` inline in `render_leaps_list()` (not a new `LeapsSnapshot` field, since it's a one-line derivation of two fields the snapshot already carries) and is placed right after Premium, before P&L/Profit %, so the table reads left-to-right as price paid → total paid → result.
+
+`render_leaps_list()` now takes an optional `positions` parameter (aligned 1:1 with `snapshots` by index) purely to source each position's `entry_date` for its new "Entry Date" column — `LeapsSnapshot` itself has no entry-date field, only `entry_stock_price`. The table also gains "Days Held" and "Ann. Return" columns; `render_leaps_detail()` gains an "Annualized return: X%/yr (over N days held)" line right after "Profit %".
+
+**Color (`analysis.leaps_annualized_return_color()`):** green > +15%/yr, yellow 0–15%/yr, red < 0%/yr, dim when unavailable — reuses the same growth bands as `analysis._score_growth()`, applied to a time-normalized return instead of a reported growth rate.
 
 ## Rebalancing Logic
 

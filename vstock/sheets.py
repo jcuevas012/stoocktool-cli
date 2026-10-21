@@ -62,14 +62,14 @@ def ensure_sheet(client: gspread.Client) -> gspread.Worksheet:
         return worksheet
 
     # Create new spreadsheet
-    spreadsheet = client.create("Stocktool Portfolio")
+    spreadsheet = client.create("Vstock Portfolio")
     worksheet = spreadsheet.sheet1
     worksheet.update("A1:E1", [HEADER_ROW])
     sheet_id = spreadsheet.id
     _write_sheet_id_to_env(sheet_id)
 
     # Update the module-level constant so subsequent calls in the same session work
-    import stocktool.config as cfg
+    import vstock.config as cfg
     cfg.GOOGLE_SHEET_ID = sheet_id
 
     from rich.console import Console

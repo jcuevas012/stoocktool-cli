@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from stocktool.leaps import LeapsPosition
+from vstock.leaps import LeapsPosition
 
 
 def make_position() -> LeapsPosition:
@@ -70,17 +70,17 @@ class ShouldCaptureIvReadingTests(unittest.TestCase):
     when no market IV was fetched this run."""
 
     def test_active_with_market_iv_captures(self):
-        from stocktool.cli import _should_capture_iv_reading
+        from vstock.cli import _should_capture_iv_reading
 
         self.assertTrue(_should_capture_iv_reading("ACTIVE", 30.0))
 
     def test_closed_position_never_captures(self):
-        from stocktool.cli import _should_capture_iv_reading
+        from vstock.cli import _should_capture_iv_reading
 
         self.assertFalse(_should_capture_iv_reading("CLOSED", 30.0))
 
     def test_no_market_iv_never_captures(self):
-        from stocktool.cli import _should_capture_iv_reading
+        from vstock.cli import _should_capture_iv_reading
 
         self.assertFalse(_should_capture_iv_reading("ACTIVE", None))
 

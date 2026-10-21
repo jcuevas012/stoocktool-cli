@@ -4,9 +4,9 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from stocktool.analysis import build_leaps_earnings_context, leaps_earnings_move_stats
-from stocktool.data import fetch_earnings_move_history, fetch_next_earnings_date
-from stocktool.leaps import LeapsPosition
+from vstock.analysis import build_leaps_earnings_context, leaps_earnings_move_stats
+from vstock.data import fetch_earnings_move_history, fetch_next_earnings_date
+from vstock.leaps import LeapsPosition
 
 
 class FetchEarningsMoveHistoryTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class FetchEarningsMoveHistoryTests(unittest.TestCase):
         ticker.get_earnings_dates.return_value = earnings_df
         ticker.history.return_value = hist_df
 
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             moves = fetch_earnings_move_history("TEST", quarters=8)
 
         self.assertEqual(len(moves), 1)
@@ -41,7 +41,7 @@ class FetchEarningsMoveHistoryTests(unittest.TestCase):
 
     def test_never_raises_on_fetch_failure(self):
         # Review Focus #5.
-        with patch("stocktool.data.yf.Ticker", side_effect=RuntimeError("network down")):
+        with patch("vstock.data.yf.Ticker", side_effect=RuntimeError("network down")):
             moves = fetch_earnings_move_history("TEST")
 
         self.assertEqual(moves, [])
@@ -50,7 +50,7 @@ class FetchEarningsMoveHistoryTests(unittest.TestCase):
         # Review Focus #5.
         ticker = Mock()
         ticker.get_earnings_dates.return_value = pd.DataFrame()
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             moves = fetch_earnings_move_history("TEST")
 
         self.assertEqual(moves, [])
@@ -65,7 +65,7 @@ class FetchEarningsMoveHistoryTests(unittest.TestCase):
         ticker = Mock()
         ticker.get_earnings_dates.return_value = earnings_df
         ticker.history.return_value = pd.DataFrame({"Close": []})
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             moves = fetch_earnings_move_history("TEST")
 
         self.assertEqual(moves, [])
@@ -79,14 +79,14 @@ class FetchNextEarningsDateTests(unittest.TestCase):
         ticker.calendar = {}
         ticker.get_earnings_dates.return_value = edf
 
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             result = fetch_next_earnings_date("TEST")
 
         self.assertEqual(result["earnings_date"], future_date.isoformat())
         self.assertEqual(result["days_to_earnings"], 15)
 
     def test_never_raises_on_fetch_failure(self):
-        with patch("stocktool.data.yf.Ticker", side_effect=RuntimeError("network down")):
+        with patch("vstock.data.yf.Ticker", side_effect=RuntimeError("network down")):
             result = fetch_next_earnings_date("TEST")
 
         self.assertEqual(result, {})

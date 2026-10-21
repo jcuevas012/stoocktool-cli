@@ -3,8 +3,8 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from stocktool.analysis import _institutional_flow_signal, build_valuation_snapshot
-from stocktool.data import fetch_institutional_ownership
+from vstock.analysis import _institutional_flow_signal, build_valuation_snapshot
+from vstock.data import fetch_institutional_ownership
 
 
 def holder(pct_change: float, value: float, holder_name: str = "H") -> dict:
@@ -77,7 +77,7 @@ class FetchInstitutionalOwnershipTests(unittest.TestCase):
         ticker.major_holders = major_holders
         ticker.institutional_holders = institutional_holders
 
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             result = fetch_institutional_ownership(["AAPL"])
 
         data = result["AAPL"]
@@ -91,7 +91,7 @@ class FetchInstitutionalOwnershipTests(unittest.TestCase):
         self.assertAlmostEqual(data["top_holders"][0]["pct_change"], 1.60, places=2)
 
     def test_never_raises_on_fetch_failure(self):
-        with patch("stocktool.data.yf.Ticker", side_effect=RuntimeError("network down")):
+        with patch("vstock.data.yf.Ticker", side_effect=RuntimeError("network down")):
             result = fetch_institutional_ownership(["AAPL"])
 
         self.assertEqual(result, {"AAPL": {}})
@@ -101,7 +101,7 @@ class FetchInstitutionalOwnershipTests(unittest.TestCase):
         ticker.major_holders = pd.DataFrame()
         ticker.institutional_holders = pd.DataFrame()
 
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             result = fetch_institutional_ownership(["AAPL"])
 
         self.assertEqual(result, {"AAPL": {}})

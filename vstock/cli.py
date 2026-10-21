@@ -10,7 +10,7 @@ from . import __version__
 from .config import DEFAULT_HORIZON_DAYS
 
 app = typer.Typer(
-    name="stocktool",
+    name="vstock",
     help="Stock market mid-term analysis and portfolio tracker.",
     no_args_is_help=True,
 )
@@ -32,7 +32,7 @@ console = Console()
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"stocktool v{__version__}")
+        console.print(f"vstock v{__version__}")
         raise typer.Exit()
 
 
@@ -46,7 +46,7 @@ def main(
 
 
 # ---------------------------------------------------------------------------
-# stocktool analyze
+# vstock analyze
 # ---------------------------------------------------------------------------
 
 @app.command()
@@ -78,7 +78,7 @@ def analyze(
 
 
 # ---------------------------------------------------------------------------
-# stocktool valuation
+# vstock valuation
 # ---------------------------------------------------------------------------
 
 @app.command()
@@ -130,7 +130,7 @@ def valuation(
 
 
 # ---------------------------------------------------------------------------
-# stocktool value
+# vstock value
 # ---------------------------------------------------------------------------
 
 @app.command()
@@ -152,7 +152,7 @@ def value(
 
 
 # ---------------------------------------------------------------------------
-# stocktool compare
+# vstock compare
 # ---------------------------------------------------------------------------
 
 @app.command()
@@ -180,7 +180,7 @@ def compare(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio show
+# vstock portfolio show
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("show")
@@ -194,7 +194,7 @@ def portfolio_show(
 
     portfolio = load_portfolio()
     if not portfolio.positions:
-        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        console.print("[yellow]Portfolio is empty. Add positions with `vstock portfolio add`.[/yellow]")
         raise typer.Exit()
 
     tickers = portfolio.tickers()
@@ -213,7 +213,7 @@ def portfolio_show(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio add
+# vstock portfolio add
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("add")
@@ -238,7 +238,7 @@ def portfolio_add(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio sell
+# vstock portfolio sell
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("sell")
@@ -263,7 +263,7 @@ def portfolio_sell(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio remove
+# vstock portfolio remove
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("remove")
@@ -283,7 +283,7 @@ def portfolio_remove(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio target
+# vstock portfolio target
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("target")
@@ -308,7 +308,7 @@ def portfolio_target(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio rebalance
+# vstock portfolio rebalance
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("rebalance")
@@ -333,7 +333,7 @@ def portfolio_rebalance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio sma
+# vstock portfolio sma
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("sma")
@@ -350,7 +350,7 @@ def portfolio_sma(
 
     portfolio = load_portfolio()
     if not portfolio.positions:
-        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        console.print("[yellow]Portfolio is empty. Add positions with `vstock portfolio add`.[/yellow]")
         raise typer.Exit()
 
     tickers = portfolio.tickers()
@@ -361,7 +361,7 @@ def portfolio_sma(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio overlap
+# vstock portfolio overlap
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("overlap")
@@ -407,7 +407,7 @@ def portfolio_overlap() -> None:
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio analyze
+# vstock portfolio analyze
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("analyze")
@@ -437,7 +437,7 @@ def portfolio_analyze(
 
 
 # ---------------------------------------------------------------------------
-# stocktool portfolio migrate
+# vstock portfolio migrate
 # ---------------------------------------------------------------------------
 
 @portfolio_app.command("migrate")
@@ -450,7 +450,7 @@ def portfolio_migrate() -> None:
     if not sheets_configured():
         console.print(
             "[red]Google Sheets not configured.[/red]\n"
-            "Place your service account credentials at ~/.config/stocktool/credentials.json\n"
+            "Place your service account credentials at ~/.config/vstock/credentials.json\n"
             "and set GOOGLE_SHEETS_CREDENTIALS_FILE in .env"
         )
         raise typer.Exit(1)
@@ -469,7 +469,7 @@ def portfolio_migrate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# stocktool etf compare
+# vstock etf compare
 # ---------------------------------------------------------------------------
 
 @etf_app.command("compare")
@@ -495,7 +495,7 @@ def etf_compare(
 
 
 # ---------------------------------------------------------------------------
-# stocktool etf valuation
+# vstock etf valuation
 # ---------------------------------------------------------------------------
 
 @etf_app.command("valuation")
@@ -533,7 +533,7 @@ def etf_valuation(
 
 
 # ---------------------------------------------------------------------------
-# stocktool strategy dip
+# vstock strategy dip
 # ---------------------------------------------------------------------------
 
 @strategy_app.command("dip")
@@ -552,7 +552,7 @@ def strategy_dip(
 
     portfolio = load_portfolio()
     if not portfolio.positions:
-        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        console.print("[yellow]Portfolio is empty. Add positions with `vstock portfolio add`.[/yellow]")
         raise typer.Exit()
 
     tickers = portfolio.tickers()
@@ -582,7 +582,7 @@ def strategy_dip(
 
 
 # ---------------------------------------------------------------------------
-# stocktool strategy margin
+# vstock strategy margin
 # ---------------------------------------------------------------------------
 
 @strategy_app.command("margin")
@@ -596,9 +596,9 @@ def strategy_margin(
     Pass an amount to record how much margin you currently have deployed.
 
     Examples:
-        stocktool strategy margin          # show current status
-        stocktool strategy margin 3500     # record $3,500 used
-        stocktool strategy margin --reset  # clear back to $0
+        vstock strategy margin          # show current status
+        vstock strategy margin 3500     # record $3,500 used
+        vstock strategy margin --reset  # clear back to $0
     """
     from . import data
     from .config import MAX_MARGIN_PCT
@@ -658,13 +658,13 @@ def strategy_margin(
     )
     console.print(table)
     console.print(
-        f"\n[dim]Update with:[/dim] [bold]stocktool strategy margin <amount>[/bold]  "
-        f"[dim]or[/dim] [bold]stocktool strategy margin --reset[/bold]"
+        f"\n[dim]Update with:[/dim] [bold]vstock strategy margin <amount>[/bold]  "
+        f"[dim]or[/dim] [bold]vstock strategy margin --reset[/bold]"
     )
 
 
 # ---------------------------------------------------------------------------
-# stocktool owner-earnings
+# vstock owner-earnings
 # ---------------------------------------------------------------------------
 
 @app.command("owner-earnings")
@@ -711,7 +711,7 @@ def owner_earnings(
 
 
 # ---------------------------------------------------------------------------
-# stocktool strategy puts
+# vstock strategy puts
 # ---------------------------------------------------------------------------
 
 @strategy_app.command("puts")
@@ -734,7 +734,7 @@ def strategy_puts(
 
     portfolio = load_portfolio()
     if not portfolio.positions:
-        console.print("[yellow]Portfolio is empty. Add positions with `stocktool portfolio add`.[/yellow]")
+        console.print("[yellow]Portfolio is empty. Add positions with `vstock portfolio add`.[/yellow]")
         raise typer.Exit()
 
     # Only screen individual stocks (not ETFs)
@@ -780,7 +780,7 @@ def strategy_puts(
 
 
 # ---------------------------------------------------------------------------
-# stocktool leaps add
+# vstock leaps add
 # ---------------------------------------------------------------------------
 
 def _leaps_portfolio_value() -> Optional[float]:
@@ -802,7 +802,7 @@ def _leaps_portfolio_value() -> Optional[float]:
 
 
 def _leaps_quick_valuation(ticker: str):
-    """Best-effort cross-check against the value-investing engine (`stocktool valuation`'s logic).
+    """Best-effort cross-check against the value-investing engine (`vstock valuation`'s logic).
 
     Returns None on any fetch/build failure rather than raising — this is a supplementary
     check inside the LEAPS wizard, not a hard requirement to proceed.
@@ -844,7 +844,7 @@ def _render_leaps_value_check(ticker: str) -> None:
             f"  DCF margin of safety: [{mos_color}]{valuation.margin_of_safety_pct:+.1f}%[/{mos_color}]"
             f" — {valuation.iv_rating}"
         )
-    console.print(f"[dim]Full detail: stocktool valuation {ticker}[/dim]")
+    console.print(f"[dim]Full detail: vstock valuation {ticker}[/dim]")
 
 
 def _prompt_expiration() -> "date":
@@ -1268,7 +1268,7 @@ def leaps_add() -> None:
 
 
 # ---------------------------------------------------------------------------
-# stocktool leaps list
+# vstock leaps list
 # ---------------------------------------------------------------------------
 
 @leaps_app.command("list")
@@ -1300,11 +1300,11 @@ def leaps_list(
         analysis.build_leaps_snapshot(p, prices.get(p.ticker), portfolio_value, _get_leaps_option_quote(p))
         for p in positions
     ]
-    display.render_leaps_list(snapshots)
+    display.render_leaps_list(snapshots, positions)
 
 
 # ---------------------------------------------------------------------------
-# stocktool leaps show
+# vstock leaps show
 # ---------------------------------------------------------------------------
 
 @leaps_app.command("show")
@@ -1376,7 +1376,7 @@ def leaps_show(
 
 
 # ---------------------------------------------------------------------------
-# stocktool leaps update
+# vstock leaps update
 # ---------------------------------------------------------------------------
 
 @leaps_app.command("update")
@@ -1503,7 +1503,7 @@ def leaps_update(
 
 
 # ---------------------------------------------------------------------------
-# stocktool leaps remove
+# vstock leaps remove
 # ---------------------------------------------------------------------------
 
 @leaps_app.command("remove")
@@ -1537,7 +1537,7 @@ def leaps_remove(
 
 
 # ---------------------------------------------------------------------------
-# stocktool docs  — quick-reference guide
+# vstock docs  — quick-reference guide
 # ---------------------------------------------------------------------------
 
 @app.command("docs")
@@ -1550,7 +1550,7 @@ def docs() -> None:
 
     console.print()
     console.print(Panel(
-        "[bold cyan]stocktool[/bold cyan] — Mid-term stock fundamental analysis & portfolio tracker\n"
+        "[bold cyan]vstock[/bold cyan] — Mid-term stock fundamental analysis & portfolio tracker\n"
         "[dim]No API key required · powered by yfinance[/dim]",
         title="[bold]Quick Reference Guide[/bold]",
         border_style="cyan",
@@ -1590,7 +1590,7 @@ def docs() -> None:
         ("leaps remove ID|TICKER",        "Close (not delete) a LEAPS position",              ""),
     ]
     for cmd, desc, flags in rows:
-        cmd_table.add_row(f"stocktool {cmd}", desc, flags)
+        cmd_table.add_row(f"vstock {cmd}", desc, flags)
     console.print(cmd_table)
 
     # ── Scoring thresholds ────────────────────────────────────────────────────
@@ -1700,12 +1700,12 @@ def docs() -> None:
 
     console.print(
         "[dim]Run any command with [bold]--help[/bold] for full option details.  "
-        "e.g. [bold]stocktool valuation --help[/bold][/dim]\n"
+        "e.g. [bold]vstock valuation --help[/bold][/dim]\n"
     )
 
 
 # ---------------------------------------------------------------------------
-# Entry point for `python -m stocktool.cli`
+# Entry point for `python -m vstock.cli`
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

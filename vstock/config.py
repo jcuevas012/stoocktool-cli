@@ -10,7 +10,7 @@ if _env_path.exists():
 else:
     load_dotenv()  # fallback: search cwd and parents
 
-CONFIG_DIR = Path.home() / ".config" / "stocktool"
+CONFIG_DIR = Path.home() / ".config" / "vstock"
 PORTFOLIO_FILE = CONFIG_DIR / "portfolio.json"
 MARGIN_STATE_FILE = CONFIG_DIR / "margin_state.json"
 
@@ -28,7 +28,7 @@ MARGIN_RULES = [
     (28, 0.15, "EARLY WARNING"),
 ]
 
-# LEAPS tracking (stocktool leaps)
+# LEAPS tracking (vstock leaps)
 LEAPS_FILE = CONFIG_DIR / "leaps.json"
 LEAPS_APPROVED_TICKERS = [
     t.strip().upper()

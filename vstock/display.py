@@ -13,7 +13,7 @@ from .analysis import (
     LeapsSnapshot, LeapsScenario, LeapsGammaCurve, LeapsVegaImpact, LeapsEarningsContext, score_ticker, pe_category, pe_vs_history_label, cash_debt_rating,
     capex_intensity_color, leaps_dte_color, leaps_profit_color, leaps_delta_color,
     leaps_leverage_color, leaps_exposure_color, leaps_decay_color, leaps_iv_value_verdict,
-    leaps_liquidity_rating,
+    leaps_liquidity_rating, leaps_annualized_return_color,
 )
 from .leaps import LeapsPosition
 from .portfolio import PortfolioSnapshot
@@ -294,7 +294,7 @@ def render_allocation(snapshot: PortfolioSnapshot) -> None:
 
 def render_rebalancing_signals(snapshot: PortfolioSnapshot) -> None:
     if not snapshot.rebalancing_signals:
-        console.print(Panel("No target weights set. Use `stocktool portfolio target TICKER WEIGHT` to set targets.", title="Rebalancing"))
+        console.print(Panel("No target weights set. Use `vstock portfolio target TICKER WEIGHT` to set targets.", title="Rebalancing"))
         return
 
     table = Table(title="Rebalancing Signals", show_lines=True, header_style="bold cyan")
@@ -1157,7 +1157,7 @@ def render_sma_screen(sma_data: dict[str, dict], sma_days: int = 200) -> None:
         console.print(Panel(
             f"[bold yellow]{len(below)} position(s) trading below {sma_days}d SMA:[/bold yellow] {tickers_str}\n"
             f"[dim]↳ Price is below the long-term average — may signal a buying opportunity for value investors.\n"
-            f"  Check fundamentals before adding. Use: stocktool valuation {below[0][0]}[/dim]",
+            f"  Check fundamentals before adding. Use: vstock valuation {below[0][0]}[/dim]",
             title=f"[bold yellow]Below {sma_days}-Day SMA[/bold yellow]",
             border_style="yellow",
         ))
@@ -2173,29 +2173,41 @@ def render_leaps_candidates(positions: list[LeapsPosition]) -> None:
     console.print(table)
 
 
-def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
-    """Render a table of LEAPS positions with a summary panel."""
+def render_leaps_list(snapshots: list[LeapsSnapshot], positions: Optional[list[LeapsPosition]] = None) -> None:
+    """Render a table of LEAPS positions with a summary panel.
+
+    `positions` (aligned 1:1 with `snapshots` by index) supplies the entry date, which isn't
+    itself a LeapsSnapshot field — pass it so days-held/annualized-return are shown in context.
+    """
 
     if not snapshots:
-        console.print("[yellow]No LEAPS positions found. Add one with `stocktool leaps add`.[/yellow]")
+        console.print("[yellow]No LEAPS positions found. Add one with `vstock leaps add`.[/yellow]")
         return
+
+    positions = positions or []
+    entry_dates = {snap.id: pos.entry_date for pos, snap in zip(positions, snapshots)}
 
     table = Table(title="LEAPS Positions", show_lines=True, header_style="bold cyan")
     table.add_column("ID", style="dim")
     table.add_column("Ticker", style="bold")
     table.add_column("Type")
     table.add_column("Strike", justify="right")
+    table.add_column("Entry Date")
     table.add_column("Expiration")
     table.add_column("DTE", justify="right")
+    table.add_column("Days Held", justify="right")
     table.add_column("Premium", justify="right")
+    table.add_column("Cost Basis", justify="right")
     table.add_column("P&L", justify="right")
     table.add_column("Profit %", justify="right")
+    table.add_column("Ann. Return", justify="right")
     table.add_column("Leverage", justify="right")
     table.add_column("Status")
 
     for snap in snapshots:
         dte_color = leaps_dte_color(snap.days_to_expiry)
         profit_color = leaps_profit_color(snap.profit_pct)
+        annualized_color = leaps_annualized_return_color(snap.annualized_return_pct)
         leverage_color = leaps_leverage_color(snap.leverage_ratio)
         status_str = "[green]ACTIVE[/green]" if snap.status == "ACTIVE" else "[dim]CLOSED[/dim]"
         table.add_row(
@@ -2203,11 +2215,15 @@ def render_leaps_list(snapshots: list[LeapsSnapshot]) -> None:
             snap.ticker,
             snap.option_type,
             f"${snap.strike:.2f}",
+            entry_dates.get(snap.id) or "N/A",
             snap.expiration,
             Text(str(snap.days_to_expiry), style=dte_color) if snap.days_to_expiry is not None else Text("N/A", style="dim"),
+            str(snap.days_held) if snap.days_held is not None else "N/A",
             f"${snap.premium:.2f}",
+            f"${snap.premium * 100 * snap.contracts:,.0f}",
             f"${snap.theoretical_pnl:,.0f}" if snap.theoretical_pnl is not None else "N/A",
             Text(f"{snap.profit_pct:.1f}%", style=profit_color) if snap.profit_pct is not None else Text("N/A", style="dim"),
+            Text(f"{snap.annualized_return_pct:.1f}%/yr", style=annualized_color) if snap.annualized_return_pct is not None else Text("N/A", style="dim"),
             Text(f"{snap.leverage_ratio:.1f}x", style=leverage_color) if snap.leverage_ratio is not None else Text("N/A", style="dim"),
             status_str,
         )
@@ -2304,7 +2320,7 @@ def _leaps_iv_history_lines(position: LeapsPosition, snapshot: LeapsSnapshot) ->
     the number it sits next to.
     """
     if not position.iv_history:
-        return ["  No IV history yet — run `stocktool leaps update` over time to start building this up."]
+        return ["  No IV history yet — run `vstock leaps update` over time to start building this up."]
     lines = []
     last_index = len(position.iv_history) - 1
     for i, reading in enumerate(position.iv_history[-8:]):
@@ -2377,7 +2393,7 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
         (
             f"  Current delta: [{leaps_delta_color(position.current_delta)}]{position.current_delta}[/{leaps_delta_color(position.current_delta)}]"
             if position.current_delta is not None
-            else "  Current delta: N/A — run `stocktool leaps update` with a fresh reading from your broker"
+            else "  Current delta: N/A — run `vstock leaps update` with a fresh reading from your broker"
         ),
         f"  Current theta: -${abs(position.current_theta):.2f}/day" if position.current_theta is not None else "  Current theta: N/A",
         _leaps_current_iv_line(position, snapshot),
@@ -2403,6 +2419,11 @@ def render_leaps_detail(position: LeapsPosition, snapshot: LeapsSnapshot) -> Non
         f"  Last contract trade: {snapshot.last_trade_at or 'N/A'}" if position.status == "ACTIVE" else "",
         f"  {'Realized' if position.status == 'CLOSED' else 'Estimated'} P&L: ${snapshot.theoretical_pnl:,.2f}" if snapshot.theoretical_pnl is not None else f"  {'Realized' if position.status == 'CLOSED' else 'Estimated'} P&L: N/A",
         f"  Profit %: [{profit_color}]{snapshot.profit_pct:.1f}%[/{profit_color}]" if snapshot.profit_pct is not None else "  Profit %: N/A",
+        (
+            f"  Annualized return: [{leaps_annualized_return_color(snapshot.annualized_return_pct)}]{snapshot.annualized_return_pct:.1f}%/yr[/{leaps_annualized_return_color(snapshot.annualized_return_pct)}] (over {snapshot.days_held} days held)"
+            if snapshot.annualized_return_pct is not None
+            else "  Annualized return: N/A"
+        ),
         f"  Current theta 30-day run-rate: ~${snapshot.theta_30d_run_rate:,.2f}" if snapshot.theta_30d_run_rate is not None else "  Current theta 30-day run-rate: N/A",
         f"[dim]P&L method: {pnl_method or 'unavailable'}; theta run-rate multiplies the latest known position theta by 30 and is not cumulative theta paid.[/dim]",
         f"  Position size (cash at risk): {snapshot.position_pct:.2f}% of portfolio" if snapshot.position_pct is not None else "  Position size (cash at risk): N/A",

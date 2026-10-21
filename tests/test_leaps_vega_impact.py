@@ -1,8 +1,8 @@
 import unittest
 from datetime import date, timedelta
 
-from stocktool.analysis import build_leaps_gamma_curve, build_leaps_vega_impact
-from stocktool.leaps import LeapsPosition
+from vstock.analysis import build_leaps_gamma_curve, build_leaps_vega_impact
+from vstock.leaps import LeapsPosition
 
 
 def make_position(entry_iv=None, current_iv=None) -> LeapsPosition:

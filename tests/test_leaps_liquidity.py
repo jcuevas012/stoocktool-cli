@@ -3,8 +3,8 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from stocktool.analysis import leaps_liquidity_rating
-from stocktool.data import fetch_leaps_option_quote
+from vstock.analysis import leaps_liquidity_rating
+from vstock.data import fetch_leaps_option_quote
 
 
 class LeapsLiquidityRatingTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class FetchLeapsOptionQuoteLiquidityTests(unittest.TestCase):
         ticker = Mock()
         ticker.option_chain.return_value = chain
 
-        with patch("stocktool.data.yf.Ticker", return_value=ticker):
+        with patch("vstock.data.yf.Ticker", return_value=ticker):
             result = fetch_leaps_option_quote("TEST", "CALL", 100.0, "2028-01-01")
 
         self.assertEqual(result["volume"], 89)
