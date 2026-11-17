@@ -1495,6 +1495,50 @@ def _black_scholes_greeks(
     return delta, gamma, vega
 
 
+def black_scholes_price_theta(
+    option_type: str,
+    stock_price: float,
+    strike: float,
+    years_to_expiry: float,
+    volatility: float,
+    risk_free_rate: float,
+    dividend_yield: float,
+) -> tuple[float, float]:
+    """Return European Black–Scholes price and theta, both per share.
+
+    Theta is per calendar day (annual theta / 365) and negative for a long option losing time
+    value. Used by `vstock calc leaps`, where yfinance supplies IV but no Greeks.
+    """
+    if min(stock_price, strike, years_to_expiry, volatility) <= 0:
+        raise ValueError("stock price, strike, time, and volatility must be positive")
+    root_t = math.sqrt(years_to_expiry)
+    d1 = (
+        math.log(stock_price / strike)
+        + (risk_free_rate - dividend_yield + 0.5 * volatility**2) * years_to_expiry
+    ) / (volatility * root_t)
+    d2 = d1 - volatility * root_t
+    disc_q = math.exp(-dividend_yield * years_to_expiry)
+    disc_r = math.exp(-risk_free_rate * years_to_expiry)
+    decay = -stock_price * disc_q * _normal_pdf(d1) * volatility / (2 * root_t)
+    if option_type.upper() == "CALL":
+        price = stock_price * disc_q * _normal_cdf(d1) - strike * disc_r * _normal_cdf(d2)
+        theta = (
+            decay
+            - risk_free_rate * strike * disc_r * _normal_cdf(d2)
+            + dividend_yield * stock_price * disc_q * _normal_cdf(d1)
+        )
+    elif option_type.upper() == "PUT":
+        price = strike * disc_r * _normal_cdf(-d2) - stock_price * disc_q * _normal_cdf(-d1)
+        theta = (
+            decay
+            + risk_free_rate * strike * disc_r * _normal_cdf(-d2)
+            - dividend_yield * stock_price * disc_q * _normal_cdf(-d1)
+        )
+    else:
+        raise ValueError("option_type must be CALL or PUT")
+    return price, theta / 365.0
+
+
 def build_leaps_gamma_curve(
     position: LeapsPosition,
     stock_price: Optional[float],
@@ -2101,6 +2145,7 @@ class LeapsScenarioRow:
     intrinsic: float
     pnl: float
     return_pct: float
+    price_move_pct: Optional[float] = None  # stock move vs. the scenario's base price
 
 
 @dataclass
@@ -2164,7 +2209,14 @@ def build_leaps_scenario(
         )
         pnl = intrinsic - total_cost
         return_pct = pnl / total_cost * 100 if total_cost else 0.0
-        return LeapsScenarioRow(price=price, intrinsic=intrinsic, pnl=pnl, return_pct=return_pct)
+        price_move_pct = (price - base_price) / base_price * 100 if base_price else None
+        return LeapsScenarioRow(
+            price=price,
+            intrinsic=intrinsic,
+            pnl=pnl,
+            return_pct=return_pct,
+            price_move_pct=price_move_pct,
+        )
 
     multipliers = (
         [0.7, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6]

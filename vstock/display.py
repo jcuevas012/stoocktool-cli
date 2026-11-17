@@ -16,6 +16,10 @@ from .analysis import (
     leaps_liquidity_rating, leaps_annualized_return_color,
 )
 from .leaps import LeapsPosition
+from .leaps_calc import (
+    LeapsEvaluation, VERDICT_APPROVED, VERDICT_BLOCKED, VERDICT_CAUTION, SEVERITY_OK, SEVERITY_WARNING,
+    SEVERITY_BLOCKING,
+)
 from .portfolio import PortfolioSnapshot
 
 console = Console()
@@ -2547,27 +2551,40 @@ def render_leaps_gamma_chart(
     ))
 
 
-def render_leaps_vega_section(
-    curve: Optional[LeapsGammaCurve],
-    impact: Optional[LeapsVegaImpact],
-    unavailable_reason: Optional[str],
-) -> None:
-    """Vega and its dollar impact — reuses the same model inputs as the gamma/delta chart."""
-    if curve is None or impact is None:
-        console.print(Panel(
-            unavailable_reason or "Vega unavailable; missing model inputs.",
-            title="[bold magenta]Vega Analysis[/bold magenta]",
-            border_style="magenta",
-        ))
-        return
+def _leaps_vega_lines(
+    impact: LeapsVegaImpact,
+    cost_basis: Optional[float] = None,
+    pre_trade: bool = False,
+) -> list[str]:
+    """Body lines for the Vega Analysis panel.
+
+    `cost_basis` (premium × 100 × contracts) adds each IV scenario as a % of cash paid.
+    `pre_trade` (leaps add, before saving) skips the since-entry block — entry and current IV
+    are the same reading at that point, so it would always show a meaningless +0.0pts.
+    """
+    def _pct_of_cost(amount: float) -> str:
+        return f"  ({amount / cost_basis * 100:+.1f}% of ${cost_basis:,.2f} cost)" if cost_basis else ""
+
+    label = "Vega at entry" if pre_trade else "Current vega"
     lines = [
-        f"Current vega: ${impact.vega_per_contract:,.2f} per contract per 1pt IV move "
+        f"{label}: ${impact.vega_per_contract:,.2f} per contract per 1pt IV move "
         f"(${impact.vega_total:,.2f} total for this position)",
-        f"  Impact of +10 IV points: [green]+${impact.impact_plus_10:,.2f}[/green]",
-        f"  Impact of -10 IV points: [red]{impact.impact_minus_10:,.2f}[/red]  (pre-earnings-crush scenario)",
-        f"  Impact of -20 IV points: [red]{impact.impact_minus_20:,.2f}[/red]  (panic-crush scenario)",
+        f"  Impact of +10 IV points: [green]+${impact.impact_plus_10:,.2f}[/green]{_pct_of_cost(impact.impact_plus_10)}",
+        f"  Impact of -10 IV points: [red]-${abs(impact.impact_minus_10):,.2f}[/red]{_pct_of_cost(impact.impact_minus_10)}"
+        "  (IV crush)",
+        f"  Impact of -20 IV points: [red]-${abs(impact.impact_minus_20):,.2f}[/red]{_pct_of_cost(impact.impact_minus_20)}"
+        "  (panic crush)",
         "",
     ]
+    if pre_trade:
+        if impact.current_iv is not None:
+            lines.append(f"Entry IV: {impact.current_iv:.1f}%")
+        lines.append(
+            "[dim]Before you submit: these are the option-value changes from IV alone, stock price held "
+            "fixed. Buying when IV is high means a later IV drop works against you even if the stock "
+            "doesn't move.[/dim]"
+        )
+        return lines
     if impact.entry_iv is not None:
         lines.append(f"Entry IV: {impact.entry_iv:.1f}%")
     if impact.current_iv is not None:
@@ -2586,8 +2603,26 @@ def render_leaps_vega_section(
         "[dim]Uses today's vega as a constant approximation across the whole move since entry — "
         "vega itself drifts with price, time, and IV level.[/dim]"
     )
+    return lines
+
+
+def render_leaps_vega_section(
+    curve: Optional[LeapsGammaCurve],
+    impact: Optional[LeapsVegaImpact],
+    unavailable_reason: Optional[str],
+    cost_basis: Optional[float] = None,
+    pre_trade: bool = False,
+) -> None:
+    """Vega and its dollar impact — reuses the same model inputs as the gamma/delta chart."""
+    if curve is None or impact is None:
+        console.print(Panel(
+            unavailable_reason or "Vega unavailable; missing model inputs.",
+            title="[bold magenta]Vega Analysis[/bold magenta]",
+            border_style="magenta",
+        ))
+        return
     console.print(Panel(
-        "\n".join(lines),
+        "\n".join(_leaps_vega_lines(impact, cost_basis, pre_trade)),
         title="[bold magenta]Vega Analysis[/bold magenta]",
         border_style="magenta",
     ))
@@ -2676,17 +2711,32 @@ def render_leaps_scenario(scenario: LeapsScenario) -> None:
         title=f"{scenario.ticker} {scenario.option_type} ${scenario.strike:.0f} — Scenario Analysis{exp_str}",
         show_lines=False,
         header_style="bold cyan",
-        caption="Intrinsic value at expiration only — ignores any remaining time value before then.",
+        caption=(
+            "Intrinsic value at expiration only — ignores any remaining time value before then."
+            + (
+                f"\nStock Move = change vs. ${scenario.base_price:,.2f}; Return = option P&L vs. premium paid."
+                if scenario.base_price
+                else ""
+            )
+        ),
     )
     table.add_column("Price", justify="right")
+    table.add_column("Stock Move", justify="right")
     table.add_column("Intrinsic", justify="right")
     table.add_column("P&L", justify="right")
     table.add_column("Return", justify="right")
 
     for row in scenario.rows:
         color = "green" if row.pnl > 0 else ("yellow" if row.pnl == 0 else "red")
+        if row.price_move_pct is None:
+            move_cell = Text("N/A", style="dim")
+        else:
+            flat = abs(row.price_move_pct) < 0.05
+            move_color = "dim" if flat else ("green" if row.price_move_pct > 0 else "red")
+            move_cell = Text("0.0%" if flat else f"{row.price_move_pct:+.1f}%", style=move_color)
         table.add_row(
             f"${row.price:,.0f}",
+            move_cell,
             f"${row.intrinsic:,.0f}",
             Text(f"{row.pnl:+,.0f}", style=color),
             Text(f"{row.return_pct:+.0f}%", style=color),
@@ -2781,3 +2831,314 @@ def _fmt_large(value: float | None) -> str:
     if abs_val >= 1e6:
         return f"{sign}${abs_val / 1e6:.2f}M"
     return f"{sign}${abs_val:,.0f}"
+
+
+# ---------------------------------------------------------------------------
+# LEAPS Decision Analyzer (vstock calc leaps)
+# ---------------------------------------------------------------------------
+
+_CALC_RULE_ICONS = {
+    SEVERITY_OK: "✅",
+    SEVERITY_WARNING: "⚠️ ",
+    SEVERITY_BLOCKING: "❌",
+}
+_CALC_VERDICT_STYLE = {
+    VERDICT_APPROVED: ("✅ BUY APPROVED", "green"),
+    VERDICT_CAUTION: ("⚠️  BUY WITH CAUTION", "yellow"),
+}
+
+
+def _calc_verdict_text(ev: LeapsEvaluation) -> tuple[str, str]:
+    if ev.verdict in _CALC_VERDICT_STYLE:
+        label, color = _CALC_VERDICT_STYLE[ev.verdict]
+        if ev.verdict == VERDICT_CAUTION:
+            label += f" — {ev.warning_count} warning{'s' if ev.warning_count != 1 else ''}"
+        return label, color
+    plural = "s" if ev.blocking_count != 1 else ""
+    return f"❌ DO NOT BUY — {ev.blocking_count} blocking rule{plural} failed", "red"
+
+
+def _money(value: Optional[float], signed: bool = False) -> str:
+    if value is None:
+        return "N/A"
+    if signed:
+        if abs(value) < 0.5:
+            return "$0"
+        return f"{'+' if value > 0 else '-'}${abs(value):,.0f}"
+    return f"${value:,.2f}"
+
+
+def _pnl_cell(value: Optional[float]) -> str:
+    if value is None:
+        return "[dim]—[/dim]"
+    color = "green" if value > 0.5 else "red" if value < -0.5 else "dim"
+    return f"[{color}]{_money(value, signed=True)}[/{color}]"
+
+
+def _calc_section(title: str) -> None:
+    console.print(f"\n[bold cyan]{title}[/bold cyan]")
+    console.print("[dim]" + "─" * 66 + "[/dim]")
+
+
+def render_leaps_calc(ev: LeapsEvaluation) -> None:
+    """Full §5.1 table view: header, rule checklist, verdict, metrics, theta, scenarios, context."""
+    i, m = ev.inputs, ev.metrics
+    exp_label = date_label(i.expiration)
+    header = [
+        f"[bold]{i.ticker} {exp_label} ${i.strike:g} {i.option_type.title()}[/bold]"
+        + ("  [magenta](PAPER)[/magenta]" if i.paper else ""),
+        f"Underlying {_money(i.spot)}  |  Premium {_money(i.premium)} [dim]({i.premium_source})[/dim]  |  "
+        f"Cost {f'${m.contract_cost:,.0f}' if m.contract_cost is not None else 'N/A'}",
+        f"DTE {m.days_to_expiry} days  |  IV {f'{i.iv_pct:.1f}%' if i.iv_pct is not None else 'N/A'}"
+        f"  |  Delta {f'{abs(i.delta):.2f}' if i.delta is not None else 'N/A'}"
+        f"  |  Theta {f'-${abs(i.theta) * 100:,.2f}/day' if i.theta is not None else 'N/A'}",
+    ]
+    if i.requested_expiration and i.requested_expiration != i.expiration:
+        header.append(f"[yellow]Requested {i.requested_expiration} → nearest listed expiry {i.expiration}[/yellow]")
+    sources = []
+    if i.iv_source:
+        sources.append(f"IV: {i.iv_source}")
+    if i.delta_source:
+        sources.append(f"Greeks: {i.delta_source}")
+    if sources:
+        header.append("[dim]" + " · ".join(sources) + "[/dim]")
+    console.print(Panel("\n".join(header), title="[bold]LEAPS DECISION ANALYZER[/bold]",
+                        subtitle="vstock", border_style="cyan"))
+
+    _calc_section("RULE COMPLIANCE")
+    for r in ev.rules:
+        if r.severity == "skipped":
+            console.print(f"  [dim]⏭  {r.rule}: skipped ({r.actual})[/dim]")
+            continue
+        icon = _CALC_RULE_ICONS[r.severity]
+        style = {"ok": "", "warning": "yellow", "blocking": "bold red"}[r.severity]
+        text = f"{r.rule}: {r.actual}  [dim](req: {r.required})[/dim]"
+        console.print(f"  {icon} " + (f"[{style}]{text}[/{style}]" if style else text))
+        if r.why and r.severity != "ok":
+            console.print(f"      [dim]Why: {r.why}[/dim]")
+
+    label, color = _calc_verdict_text(ev)
+    console.print(f"\n[bold {color}]VERDICT: {label}[/bold {color}]")
+
+    _calc_section("KEY METRICS")
+
+    def move(pct: Optional[float]) -> str:
+        return f"({pct:+.1f}%)" if pct is not None else ""
+
+    console.print(f"  Breakeven at expiry        {_money(m.breakeven):<10} {move(m.breakeven_move_pct)} move required")
+    console.print(f"  +50% exit trigger 🎯       {_money(m.exit_price):<10} {move(m.exit_move_pct)}")
+    console.print(f"  -50% stop loss 🛑          {_money(m.stop_price):<10} {move(m.stop_move_pct)}")
+    console.print(f"  Critical exit date         {m.critical_exit_date}  (90 days before expiry)")
+    if m.max_loss is not None:
+        console.print(f"  Max loss (stock ≤ ${i.strike:g})   {_money(m.max_loss, signed=True)}  (100% of premium)")
+    if m.position_pct is not None:
+        console.print(
+            f"  Position size              {m.position_pct:.1f}% of NAV  "
+            f"[dim](cap {m.max_position_cost and f'${m.max_position_cost:,.0f}'} · IV-tier cap "
+            f"{m.iv_max_position_pct:g}% = ${m.iv_max_cost:,.0f})[/dim]"
+        )
+    console.print("  [dim]Exit/stop use a linear delta approximation; actual fills vary with IV, gamma and time.[/dim]")
+
+    if m.theta_projection:
+        _calc_section(f"THETA DECAY (if stock stays at {_money(i.spot)})")
+        for days, dollars in m.theta_projection.items():
+            pct = m.theta_projection_pct.get(days)
+            pct_txt = f"({pct:+.1f}% of premium)" if pct is not None else ""
+            console.print(f"  {days:>4} days:  [red]{_money(dollars, signed=True):<9}[/red] {pct_txt}")
+        console.print("  [dim]Constant current theta — real decay accelerates as expiry nears.[/dim]")
+
+    if ev.scenarios:
+        _calc_section("SCENARIO MATRIX (P&L per contract)")
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("Stock", justify="right")
+        table.add_column("Move", justify="right")
+        table.add_column("", no_wrap=True)
+        horizons = list(ev.scenarios[0].pnl_by_horizon.keys())
+        for days in horizons:
+            table.add_column("Today" if days == 0 else f"+{days}d", justify="right")
+        table.add_column("@Expiry", justify="right")
+        for row in ev.scenarios:
+            cells = [_pnl_cell(row.pnl_by_horizon[d]) for d in horizons]
+            table.add_row(
+                f"${row.price:,.2f}", f"{row.move_pct:+.1f}%", " ".join(row.markers),
+                *cells, _pnl_cell(row.pnl_at_expiry),
+            )
+        console.print(table)
+        console.print("[dim]🎯 = +50% exit  BE = breakeven  K = strike  🛑 = -50% stop  NOW = current price. "
+                      "Pre-expiry columns: premium + delta·Δstock + theta·days, floored at intrinsic.[/dim]")
+
+    _calc_section("PORTFOLIO CONTEXT")
+    if i.existing_leaps:
+        console.print("  Current LEAPS:")
+        for p in i.existing_leaps:
+            console.print(f"    • {p.ticker} {p.expiration} ${p.strike:g}{p.option_type[0]} @ ${p.premium:,.2f}")
+        console.print("  Correlation profile:")
+        for name, corr in ev.correlations:
+            flag = " ⚠️" if corr > 0.70 else ""
+            console.print(f"    • {i.ticker}-{name}: {corr:.2f}{flag}")
+    else:
+        console.print("  [dim]No active LEAPS tracked (`vstock leaps list`) — correlation check skipped.[/dim]")
+    if i.nav is not None:
+        console.print(f"  NAV ${i.nav:,.0f} · margin ${i.used_margin:,.0f}")
+
+    _calc_section("ACTION RECOMMENDATION")
+    if ev.verdict == VERDICT_BLOCKED:
+        console.print(f"  Not yet — {ev.blocking_count} blocking rule(s) fail. Resolve first:")
+    elif ev.verdict == VERDICT_CAUTION:
+        console.print("  Allowed, but review the warnings:")
+    else:
+        console.print(f"  [green]All rules pass. Place a limit order at the midpoint{f' (${i.mid:.2f})' if i.mid else ''}.[/green]")
+    for n, line in enumerate(ev.recommendations, 1):
+        console.print(f"    {n}. {line}")
+    if ev.verdict != VERDICT_APPROVED and ev.strengths:
+        console.print("\n  Once resolved, this contract's strengths:")
+        for s in ev.strengths:
+            console.print(f"    • {s}")
+    phase_rule = next((r for r in ev.rules if r.rule == "Portfolio phase"), None)
+    if phase_rule is not None and phase_rule.severity == SEVERITY_BLOCKING:
+        console.print(f"\n  [dim]Set alert: re-run this command once {phase_rule.required}.[/dim]")
+
+
+def date_label(iso: str) -> str:
+    from datetime import date as _date
+    try:
+        return _date.fromisoformat(iso).strftime("%b %d, %Y")
+    except ValueError:
+        return iso
+
+
+def format_leaps_calc_compact(ev: LeapsEvaluation) -> str:
+    """One-line summary for loops/dashboards (plain text, no rich markup)."""
+    i, m = ev.inputs, ev.metrics
+
+    def num(v: Optional[float], fmt: str) -> str:
+        return format(v, fmt) if v is not None else "N/A"
+
+    be = f"BE ${num(m.breakeven, ',.0f')}" + (f" ({m.breakeven_move_pct:+.1f}%)" if m.breakeven_move_pct is not None else "")
+    if ev.verdict == VERDICT_BLOCKED:
+        verdict = f"❌ BLOCKING ({ev.blocking_count} rule{'s' if ev.blocking_count != 1 else ''})"
+    elif ev.verdict == VERDICT_CAUTION:
+        verdict = f"⚠️ CAUTION ({ev.warning_count} warning{'s' if ev.warning_count != 1 else ''})"
+    else:
+        verdict = "✅ APPROVED"
+    delta = num(abs(i.delta) if i.delta is not None else None, ".2f")
+    return (
+        f"{i.ticker} {i.expiration} ${i.strike:g}{i.option_type[0]} | ${num(i.premium, '.2f')} | "
+        f"Δ{delta} IV{num(i.iv_pct, '.1f')}% | {be} | Exit ${num(m.exit_price, ',.0f')} | "
+        f"Stop ${num(m.stop_price, ',.0f')} | VERDICT: {verdict}"
+        + (" | PAPER" if i.paper else "")
+    )
+
+
+def render_leaps_calc_compare(a: LeapsEvaluation, b: LeapsEvaluation) -> None:
+    table = Table(
+        title=f"LEAPS Strike Comparison: {a.inputs.ticker.upper()}",
+        header_style="bold cyan", show_lines=True,
+    )
+    table.add_column("Metric", style="bold", no_wrap=True)
+    for e in (a, b):
+        table.add_column(
+            f"{e.inputs.ticker.upper()} Strike ${e.inputs.strike:g} {e.inputs.option_type}\nExpires {e.inputs.expiration}",
+            justify="right",
+        )
+
+    def pct(v: Optional[float]) -> str:
+        return f"{v:+.1f}%" if v is not None else "N/A"
+
+    def row(name: str, fn) -> None:
+        table.add_row(name, fn(a), fn(b))
+
+    row("Premium (per share)", lambda e: _money(e.inputs.premium))
+    row("Contract cost (premium × 100)", lambda e: _money(e.metrics.contract_cost, signed=True).lstrip("+"))
+    row("Delta", lambda e: f"{abs(e.inputs.delta):.2f}" if e.inputs.delta is not None else "N/A")
+    row("Implied Volatility (IV)", lambda e: f"{e.inputs.iv_pct:.1f}%" if e.inputs.iv_pct is not None else "N/A")
+    row("Theta (time decay) / day, per contract", lambda e: f"-${abs(e.inputs.theta) * 100:,.2f}" if e.inputs.theta is not None else "N/A")
+    row("Breakeven at expiration (stock price)", lambda e: f"{_money(e.metrics.breakeven)} ({pct(e.metrics.breakeven_move_pct)})")
+    row("+50% profit exit 🎯 (stock price)", lambda e: f"{_money(e.metrics.exit_price)} ({pct(e.metrics.exit_move_pct)})")
+    row("-50% stop loss 🛑 (stock price)", lambda e: f"{_money(e.metrics.stop_price)} ({pct(e.metrics.stop_move_pct)})")
+    row("Position % of Net Asset Value (NAV)", lambda e: f"{e.metrics.position_pct:.1f}%" if e.metrics.position_pct is not None else "N/A")
+    row("Bid-ask spread (% of mid price)", lambda e: f"{e.inputs.spread_pct:.1f}%" if e.inputs.spread_pct is not None else "N/A")
+    row("Failed rules", lambda e: ", ".join(
+        r.rule for r in e.rules if r.severity in (SEVERITY_BLOCKING, SEVERITY_WARNING)
+    ) or "—")
+
+    def verdict(e: LeapsEvaluation) -> str:
+        label, color = _calc_verdict_text(e)
+        return f"[{color}]{label}[/{color}]"
+
+    row("Verdict", verdict)
+    console.print(table)
+
+
+def render_leaps_payoff_chart(ev: LeapsEvaluation, width: int = 50, height: int = 12) -> None:
+    """ASCII at-expiration payoff diagram with breakeven/exit/stop markers."""
+    i, m = ev.inputs, ev.metrics
+    if i.spot is None or i.premium is None:
+        console.print("[dim]Payoff chart unavailable: missing price or premium.[/dim]")
+        return
+    low = min(i.strike * 0.85, (m.stop_price or i.spot) * 0.95, i.spot * 0.75)
+    high = max(i.spot * 1.5, (m.exit_price or i.spot) * 1.05)
+    prices = [low + (high - low) * c / (width - 1) for c in range(width)]
+    pnls = [(max(0.0, p - i.strike) if i.option_type == "CALL" else max(0.0, i.strike - p)) * 100
+            - i.premium * 100 for p in prices]
+    p_min, p_max = min(pnls), max(pnls)
+    span = (p_max - p_min) or 1.0
+
+    def row_for(value: float) -> int:
+        return max(0, min(height - 1, round((p_max - value) / span * (height - 1))))
+
+    grid = [[" "] * width for _ in range(height)]
+    zero_row = row_for(0.0)
+    for c in range(width):
+        grid[zero_row][c] = "─"
+    for c, value in enumerate(pnls):
+        grid[row_for(value)][c] = "●"
+
+    def col_for(price: Optional[float]) -> Optional[int]:
+        if price is None or not low <= price <= high:
+            return None
+        return round((price - low) / (high - low) * (width - 1))
+
+    marker_line = [" "] * width
+    for price, mark in ((m.stop_price, "S"), (i.strike, "K"), (m.breakeven, "B"), (i.spot, "^"), (m.exit_price, "E")):
+        c = col_for(price)
+        if c is not None:
+            marker_line[c] = mark
+
+    lines = []
+    for r, cells in enumerate(grid):
+        value = p_max - r * span / (height - 1)
+        lines.append(f"{_money(value, signed=True):>9} ┤" + "".join(cells))
+    lines.append(" " * 10 + "└" + "─" * width)
+    lines.append(" " * 11 + "".join(marker_line))
+    lines.append(f"{'':11}${low:,.0f}{'':>{max(1, width - 16)}}${high:,.0f}")
+    lines.append(
+        "[dim]S = -50% stop 🛑 · K = strike · B = breakeven · ^ = current price · E = +50% exit 🎯. "
+        "Y: P&L per contract at expiration; X: stock price at expiration.[/dim]"
+    )
+    console.print(Panel("\n".join(lines),
+                        title=f"[bold cyan]Payoff Diagram: {ev.contract_label}[/bold cyan]",
+                        border_style="cyan"))
+
+
+def render_leaps_eval_history(rows: list[dict]) -> None:
+    if not rows:
+        console.print("[dim]No saved evaluations yet. Use `vstock calc leaps ... --save`.[/dim]")
+        return
+    table = Table(title="LEAPS Evaluation History", header_style="bold cyan")
+    for col, justify in (("ID", "right"), ("Date", "left"), ("Contract", "left"), ("Premium", "right"),
+                         ("Δ", "right"), ("Pos %", "right"), ("Verdict", "left")):
+        table.add_column(col, justify=justify, no_wrap=True)
+    colors = {"APPROVED": "green", "CAUTION": "yellow", "BLOCKED": "red"}
+
+    for r in rows:
+        color = colors.get(r["verdict"], "white")
+        table.add_row(
+            str(r["id"]), str(r["evaluated_at"])[:10],
+            f"{r['ticker']} {r['expiration_date']} ${r['strike']:g}C",
+            f"${r['premium']:.2f}",
+            f"{abs(r['delta']):.2f}" if r["delta"] is not None else "N/A",
+            f"{r['position_size_pct']:.1f}%" if r["position_size_pct"] is not None else "paper",
+            f"[{color}]{r['verdict']}[/{color}]",
+        )
+    console.print(table)

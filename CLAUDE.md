@@ -37,6 +37,9 @@ vstock/
 │                   load/save with auto-routing (Google Sheets → JSON fallback)
 ├── leaps.py      — LeapsPosition/LeapsBook dataclasses, load_leaps()/save_leaps()
 │                   (local JSON only — no Sheets routing, unlike portfolio.py)
+├── leaps_calc.py — `calc leaps` decision analyzer: CalcInputs/RuleCheck/LeapsEvaluation,
+│                   one check_* function per framework rule, evaluate_leaps() (pure, no I/O)
+├── leaps_eval_history.py — SQLite history for `calc leaps --save` (stdlib sqlite3)
 ├── sheets.py     — Google Sheets CRUD: load_portfolio_from_sheet,
 │                   save_portfolio_to_sheet, sync_position, remove_position_from_sheet
 ├── display.py    — Rich table/panel renderers + render_pie_chart() +
@@ -161,6 +164,10 @@ vstock leaps list [--all] [--closed]
 vstock leaps show ID|TICKER
 vstock leaps update ID|TICKER
 vstock leaps remove ID|TICKER
+vstock calc leaps TICKER --strike PRICE --expiration YYYY-MM-DD [--premium] [--nav] [--margin]
+                         [--iv-percentile] [--paper] [--compare STRIKE] [--output table|json|compact]
+                         [--save] [--chart] [--scenarios 260,280,300]
+vstock calc history leaps [--ticker] [--limit 20]
 vstock docs
 ```
 
@@ -658,7 +665,9 @@ Leverage Ratio           = |Effective Delta × current_stock_price| / current op
 
 Color thresholds: `analysis.leaps_leverage_color()` — green ≤4x (solidly stock-like), yellow 4–7x (typical deep-ITM LEAPS), red >7x (drifted into speculative, low-delta territory — recheck with `leaps update`). `analysis.leaps_exposure_color()` reuses the wizard's own `LEAPS_WARN_POSITION_PCT`/`LEAPS_MAX_POSITION_PCT` bands (3%/5%) applied to `effective_position_pct` instead of cash. `leaps list`'s summary panel flags any active position whose delta has drifted red or whose leverage has crossed 7x, so multi-position monitoring doesn't require opening each one with `leaps show`.
 
-**Vega + IV Impact:** `analysis._black_scholes_greeks()` extends the existing delta/gamma Black–Scholes helper to also return vega (textbook per-share vega for a 100-point vol move, divided by 100 for one percentage point, multiplied by 100 shares per contract — the two scalings cancel, so the raw `S × e^(-qT) × φ(d1) × √T` is already the right per-contract-per-point number). `LeapsGammaCurve.vega` carries this at the current spot alongside the existing `model_delta`/`gamma`. `analysis.LeapsVegaImpact` + `build_leaps_vega_impact(curve, position, current_iv)` turn that into dollar figures: `vega_total` (`vega × contracts`), the dollar impact of ±10/-20 IV points, and `vega_pnl_since_entry` (`vega_total × (current_iv − entry_iv)`, preferring this run's live option-chain IV, then saved current IV, then clearly flagged entry-IV fallback). Rendered by `display.render_leaps_vega_section()` right after the gamma/delta chart in `leaps show`/`leaps update`. It is a constant-vega approximation; vega changes with price, time, and IV. Not shown in `leaps add`'s wizard.
+**Vega + IV Impact:** `analysis._black_scholes_greeks()` extends the existing delta/gamma Black–Scholes helper to also return vega (textbook per-share vega for a 100-point vol move, divided by 100 for one percentage point, multiplied by 100 shares per contract — the two scalings cancel, so the raw `S × e^(-qT) × φ(d1) × √T` is already the right per-contract-per-point number). `LeapsGammaCurve.vega` carries this at the current spot alongside the existing `model_delta`/`gamma`. `analysis.LeapsVegaImpact` + `build_leaps_vega_impact(curve, position, current_iv)` turn that into dollar figures: `vega_total` (`vega × contracts`), the dollar impact of ±10/-20 IV points, and `vega_pnl_since_entry` (`vega_total × (current_iv − entry_iv)`, preferring this run's live option-chain IV, then saved current IV, then clearly flagged entry-IV fallback). Rendered by `display.render_leaps_vega_section()` right after the gamma/delta chart in `leaps show`/`leaps update`. It is a constant-vega approximation; vega changes with price, time, and IV.
+
+**Vega before saving (`leaps add`):** the wizard renders the same Vega Analysis panel right after the gamma/delta chart and **before** the "Save this LEAPS position?" prompt, so IV-crush exposure is visible before the real broker order is submitted. It is called with `pre_trade=True` and `cost_basis=premium × 100 × contracts`: the ±10/−20 IV-point impacts also show as a % of cash paid, and the since-entry block is skipped (entry and current IV are the same reading at that point, so it would always read +0.0pts). Lines are built by `display._leaps_vega_lines()` (testable without a console). Vega units: $ per contract per 1 IV point — matches a broker's per-share vega × 100 (verified against IBKR's model Greeks: ~2–3% apart at the same IV, from American vs. European pricing and rate inputs). The IV input dominates accuracy far more than the formula does.
 
 **IV Rank (self-tracked history):** `analysis.leaps_iv_rank(current_iv, iv_history)` measures today's IV position as a percentage of the span from the *minimum to maximum* of this position's accumulated `iv_history`; this is a range rank, not an empirical percentile or a true 52-week range. It uses only readings captured since tracking started and returns `None` below `LEAPS_IV_RANK_MIN_READINGS` (5) readings. A 4-tier ladder — `LEAPS_IV_RANK_CHEAP_MAX`/`NORMAL_MAX`/`ELEVATED_MAX` (30/60/80) — maps to CHEAP / NORMAL / ELEVATED / EXPENSIVE. It sits alongside the CHEAP/FAIR/EXPENSIVE realized-volatility verdict above; the two use different comparisons. `leaps show` appends one `IvReading` per calendar day, deduped so repeated same-day runs don't flood the history. In the IV History block, a difference over 5 points between the entry-day reading and manually entered entry IV produces an entry-day mismatch note.
 
@@ -675,7 +684,10 @@ Intrinsic (CALL) = max(0, price - strike) × 100 × contracts
 Intrinsic (PUT)  = max(0, strike - price) × 100 × contracts
 P&L              = Intrinsic - (premium × 100 × contracts)
 Return %         = P&L / (premium × 100 × contracts) × 100
+Stock Move %     = (price - base_price) / base_price × 100     [None if base_price is unavailable]
 ```
+
+**Stock Move column:** each ladder row shows the underlying's % change from the scenario's `base_price` (current price, falling back to `entry_stock_price`) alongside the option's own `Return %`, so the row reads as "stock does X% → contract does Y%" — the leverage of the position is visible per row instead of having to compare dollar prices mentally. Stored as `LeapsScenarioRow.price_move_pct` (`Optional[float]`, defaults to `None` so the dataclass stays constructible without it), computed inside `build_leaps_scenario`'s `_row()` closure, which already has `base_price` — no new input or fetch. Rendered in `display.render_leaps_scenario()` as the second column (right after Price, before Intrinsic): green when positive, red when negative, dim `0.0%` at the base price itself (an exact-zero guard, `abs(...) < 0.05`, avoids a misleading `+0.0%`), and dim `N/A` when `base_price` is unavailable. Colored by raw direction, **not** by whether the move helps the position — a PUT ladder still shows a price drop in red, because the column describes the stock, not the P&L (the P&L/Return columns already carry that signal). The table caption names the base price so the percentages are never ambiguous.
 
 Price points are generated from a fixed set of multipliers on the current (or entry) stock price — `[0.7, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.6]` for CALLs, the mirrored descending set for PUTs — plus the strike and breakeven always inserted explicitly, deduped and sorted. "Key Levels" states the 100%-loss threshold, breakeven, and the % move (with direction — "rise" for CALL, "fall" for PUT) needed to break even within the remaining days-to-expiry (shown in months). Two named "+20% / +40% move" scenarios are included as a quick gut-check.
 
@@ -707,6 +719,61 @@ Annualized Return % = Profit % × (365 / Days Held)   [None if Days Held <= 0 or
 `render_leaps_list()` now takes an optional `positions` parameter (aligned 1:1 with `snapshots` by index) purely to source each position's `entry_date` for its new "Entry Date" column — `LeapsSnapshot` itself has no entry-date field, only `entry_stock_price`. The table also gains "Days Held" and "Ann. Return" columns; `render_leaps_detail()` gains an "Annualized return: X%/yr (over N days held)" line right after "Profit %".
 
 **Color (`analysis.leaps_annualized_return_color()`):** green > +15%/yr, yellow 0–15%/yr, red < 0%/yr, dim when unavailable — reuses the same growth bands as `analysis._score_growth()`, applied to a time-normalized return instead of a reported growth rate.
+
+## LEAPS Decision Analyzer (`vstock calc leaps`)
+
+Pre-trade answer to "should I buy this LEAPS call right now?". It checks the contract against the user's locked framework and gives a ✅/⚠️/❌ checklist, a verdict, key exit levels, theta decay, a scenario matrix, and an optional ASCII payoff chart. This is separate from the `leaps add` wizard: `leaps add` records a trade, while `calc leaps` decides whether to make one. The two have different approved-ticker lists on purpose.
+
+**Single source of truth:** every threshold lives in `config.py`'s `CALC_*` block (approved names, phase NAV thresholds, correlation matrix, sectors, IV sizing tiers, margin cap). **There is no `--force`/`--override` flag, by design.** To change a rule, edit that block.
+
+**Data (yfinance only — the CLI has no IBKR access):** `data.fetch_leaps_calc_inputs()` resolves the nearest listed expiration (`resolve_leaps_expiration`) and checks that the strike exists. If it doesn't, it suggests the nearest strikes above and below plus the strike increment. It then fetches four things in parallel, reusing existing helpers: `fetch_leaps_option_quote`, `fetch_leaps_gamma_inputs` (spot, ^TNX rate, dividend yield), `fetch_next_earnings_date`, and `fetch_realized_volatility`.
+- yfinance gives no Greeks, so delta, gamma, vega and theta are **Black–Scholes model values** from the option-chain IV. They come from `_black_scholes_greeks` plus `analysis.black_scholes_price_theta`, with theta per share per calendar day. If the IV is missing or below 1%, 1Y realized volatility is used and labeled as such.
+- If Yahoo's calendar still shows a past earnings date, it is projected forward in 91-day steps and marked "(est.)".
+- NAV comes from `--nav`, else `cli._leaps_portfolio_value()`. In real mode with neither, the command exits with a clear message and never guesses.
+- Margin comes from `--margin`, else the `strategy margin` state (`data.get_used_margin()`).
+- Existing LEAPS come from `leaps.json` active positions.
+
+**Formulas (`leaps_calc.py`):**
+```
+Breakeven         = strike + premium
+Exit (+50%)       = spot + 0.5 × premium / delta        Stop (−50%) = spot − 0.5 × premium / delta
+Critical exit     = expiration − 90 days
+Theta N-day $     = theta × N × 100                     (constant current theta — understates late decay)
+Short-term value  = max(intrinsic, premium + delta·Δstock + theta·days)   (theta negative; the spec's
+                    sample code subtracted theta twice — fixed here)
+At expiry         = max(0, price − strike)
+```
+The scenario grid is spot × `CALC_DEFAULT_PRICE_GRID` (or `--scenarios`), plus marked rows for 🎯 exit, BE, K (strike), 🛑 stop and NOW. Horizons are `CALC_HORIZONS` plus expiry. A horizon at or beyond DTE shows "—".
+
+**Rules (`run_rule_checks`) — severity decides the verdict:**
+
+| Rule | Blocking | Warning |
+|---|---|---|
+| Approved ticker | not in `CALC_APPROVED_TICKERS`; PLTR/TSLA until NAV ≥ their phase (never in paper) | — |
+| Delta | outside 0.70–0.90, or unknown | 0.70–0.75 / 0.85–0.90 |
+| DTE | < 365 | — |
+| IV level / sizing | — | IV ≥ 60%, IV unknown, or position % > IV-tier cap (4/3/1%) |
+| IV crush trap | IV pctile > 70 **and** earnings < 30d | — |
+| Position size | cost > 5% NAV | — |
+| Margin | margin ≥ 10% NAV | — |
+| Phase | NAV < `CALC_PHASE_THRESHOLDS[ticker]` (default $120K) | — |
+| Bid-ask spread | — | > 5% of mid, or no two-sided quote |
+| Fill price | — | premium ≥ ask ("paying the ask") |
+| Correlation | — | max vs existing LEAPS > 0.70 (same ticker = 1.0; unknown pair 0.65) |
+| Duplicate contract | — | same ticker/strike/expiry already ACTIVE |
+| Sector diversification | — | 3+ LEAPS spanning < 3 `CALC_SECTORS` |
+
+**Rule messages must explain themselves.** `RuleCheck` has an optional `why` field: a plain-English reason the rule exists, shown as a dim `Why:` line under any rule that doesn't pass. The `actual` text should name the bucket the value fell into and how far off it is, not just echo numbers. For example, IV sizing reads "IV 47.6% is in the 40–60% tier → max 3% of NAV ($3,000), but this contract is 8.1% of NAV ($8,113) — 2.7× over the cap". Build the `required` text from the `config.py` constants (e.g. `leaps_calc._iv_tier_labels()` reads `CALC_IV_SIZING`) so it can't drift from the rule.
+
+Verdict: any blocking rule → **BLOCKED** ("DO NOT BUY"); otherwise any warning → **CAUTION**; otherwise → **APPROVED**. Correlation is a warning, not blocking, because the spec's worked example shows it as ⚠️ and its Test 1 expects exactly three blocking failures.
+
+**Conservative defaults:** unknown IV is treated as high (1% sizing). An unknown IV percentile is treated as > 70 (yfinance has none, so pass `--iv-percentile`). An unknown earnings date is treated as < 30 days away. A missing delta is blocking.
+
+**`--paper`:** position size, margin and phase are `skipped` (⏭). Delta, DTE, IV, correlation and fill rules still run. NAV isn't required.
+
+**Output:** `table` (Rich, §5.1 layout), `compact` (one plain line per contract), and `json` (`dataclasses.asdict` via `typer.echo`). With `--compare` the JSON is `{"primary", "compare"}`. Spinners and errors go to stderr (`err_console`) so JSON on stdout stays parseable. `--compare` renders `display.render_leaps_calc_compare`, whose title and column headers always name the ticker and resolved expiration in full words (`GOOGL Strike $260 CALL` / `Expires 2028-06-16`, never a bare `$260C`), with row labels spelled out rather than abbreviated (e.g. "Implied Volatility (IV)", "Position % of Net Asset Value (NAV)") since the tool targets beginners, and `--chart` renders `render_leaps_payoff_chart`, a hand-drawn ASCII payoff (no plotext dependency).
+
+**History:** `--save` appends one row per evaluated contract to `~/.config/vstock/leaps_evaluations.db` (the `leaps_evaluations` table: key metrics + blocking/warnings JSON + full raw evaluation JSON). `vstock calc history leaps` lists them newest first.
 
 ## Rebalancing Logic
 

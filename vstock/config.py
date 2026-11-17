@@ -75,6 +75,68 @@ LEAPS_LIQUIDITY_TIGHT_OI = 500
 LEAPS_LIQUIDITY_MODERATE_OI = 100
 LEAPS_LIQUIDITY_WIDE_OI = 50
 
+# ---------------------------------------------------------------------------
+# LEAPS Decision Analyzer framework (vstock calc leaps)
+# This block IS the locked framework: change a rule here, never via a CLI override flag.
+# Intentionally separate from the `leaps add` wizard settings above.
+# ---------------------------------------------------------------------------
+CALC_APPROVED_TICKERS = ["GOOGL", "AMZN", "MSFT", "META", "NVDA", "TSM", "AVGO"]
+# Names outside the base list that unlock for real money once NAV reaches their phase.
+# Paper mode skips NAV checks, so these never unlock in --paper.
+CALC_PHASE_UNLOCK_TICKERS = {"PLTR": 200_000, "TSLA": 300_000}
+CALC_DELTA_MIN = 0.75
+CALC_DELTA_MAX = 0.85
+CALC_DELTA_WARN_MIN = 0.70
+CALC_DELTA_WARN_MAX = 0.90
+CALC_MIN_DTE = 365
+CALC_MAX_POSITION_PCT = 5.0
+CALC_EXIT_DAYS_BEFORE_EXPIRY = 90
+CALC_PROFIT_TARGET_PCT = 50.0
+CALC_STOP_LOSS_PCT = 50.0
+# (IV % upper bound, max position % of NAV) — first matching tier wins.
+CALC_IV_SIZING = [(40.0, 4.0), (60.0, 3.0), (float("inf"), 1.0)]
+CALC_IV_HIGH_PCT = 60.0
+CALC_IV_PERCENTILE_MAX = 70.0
+CALC_EARNINGS_TRAP_DAYS = 30
+# Real-money NAV required per name (phase plan). Names not listed use the Phase 3 default.
+CALC_PHASE_THRESHOLDS = {
+    "GOOGL": 120_000,
+    "AMZN": 120_000,
+    "TSM": 150_000,
+    "PLTR": 200_000,
+    "TSLA": 300_000,
+}
+CALC_DEFAULT_PHASE_THRESHOLD = 120_000
+CALC_MARGIN_MAX_PCT = 10.0
+CALC_SPREAD_WARN_PCT = 5.0
+CALC_CORRELATION = {
+    ("GOOGL", "AMZN"): 0.78,
+    ("GOOGL", "MSFT"): 0.75,
+    ("GOOGL", "META"): 0.72,
+    ("MSFT", "META"): 0.80,
+    ("NVDA", "AVGO"): 0.82,
+    ("NVDA", "TSM"): 0.74,
+    ("AMZN", "MSFT"): 0.70,
+    ("AVGO", "TSM"): 0.76,
+}
+CALC_DEFAULT_CORRELATION = 0.65
+CALC_CORRELATION_MAX = 0.70
+CALC_SECTORS = {
+    "GOOGL": "Communication Services",
+    "META": "Communication Services",
+    "AMZN": "Consumer Discretionary",
+    "TSLA": "Consumer Discretionary",
+    "MSFT": "Software",
+    "PLTR": "Software",
+    "NVDA": "Semiconductors",
+    "AVGO": "Semiconductors",
+    "TSM": "Semiconductors",
+}
+CALC_MIN_SECTORS = 3
+CALC_DEFAULT_PRICE_GRID = [0.75, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20, 1.25, 1.35, 1.50]
+CALC_HORIZONS = [0, 30, 90, 180]
+LEAPS_EVAL_DB = CONFIG_DIR / "leaps_evaluations.db"
+
 # Google Sheets settings
 CREDENTIALS_FILE = Path(
     os.environ.get("GOOGLE_SHEETS_CREDENTIALS_FILE", str(CONFIG_DIR / "credentials.json"))

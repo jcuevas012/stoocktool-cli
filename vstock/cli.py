@@ -27,7 +27,13 @@ leaps_app = typer.Typer(help="LEAPS options tracking commands.", no_args_is_help
 # Small no-op change to exercise Codex's pull request tab.
 app.add_typer(leaps_app, name="leaps")
 
+calc_app = typer.Typer(help="Pre-trade decision calculators.", no_args_is_help=True)
+app.add_typer(calc_app, name="calc")
+calc_history_app = typer.Typer(help="Saved calculator evaluations.", no_args_is_help=True)
+calc_app.add_typer(calc_history_app, name="history")
+
 console = Console()
+err_console = Console(stderr=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -1253,6 +1259,11 @@ def leaps_add() -> None:
         position, gamma_iv, gamma_iv_source
     )
     display.render_leaps_gamma_chart(gamma_curve, broker_delta, broker_delta_label, gamma_unavailable)
+    # Shown before the save prompt so IV-crush exposure is visible before the real order is submitted.
+    vega_impact = analysis.build_leaps_vega_impact(gamma_curve, position, current_iv=gamma_iv)
+    display.render_leaps_vega_section(
+        gamma_curve, vega_impact, gamma_unavailable, cost_basis=total_cost, pre_trade=True
+    )
 
     scenario = analysis.build_leaps_scenario(position, current_price)
     display.render_leaps_scenario(scenario)
@@ -1537,6 +1548,245 @@ def leaps_remove(
 
 
 # ---------------------------------------------------------------------------
+# vstock calc leaps  — LEAPS Decision Analyzer
+# ---------------------------------------------------------------------------
+
+class CalcInputError(Exception):
+    """A human-readable reason `calc leaps` can't evaluate a contract."""
+
+
+def _build_calc_inputs(
+    ticker: str,
+    strike: float,
+    expiration: str,
+    premium: Optional[float],
+    nav: Optional[float],
+    used_margin: float,
+    iv_percentile: Optional[float],
+    paper: bool,
+    existing: list,
+):
+    """Fetch market data and assemble CalcInputs. Raises CalcInputError with a readable message."""
+    from datetime import date
+
+    from . import data
+    from .leaps_calc import CalcInputs, model_greeks
+
+    market = data.fetch_leaps_calc_inputs(ticker, strike, expiration)
+    if market.get("error"):
+        raise CalcInputError(market["error"])
+    resolved = market["expiration"]
+    if not market.get("strike_found"):
+        nearest = market.get("nearest_strikes") or []
+        hint = " or ".join(f"${s:g}" for s in nearest) or "none listed"
+        increment = market.get("strike_increment")
+        inc_text = f" Strikes near this price are listed in ${increment:g} increments." if increment else ""
+        raise CalcInputError(
+            f"No ${strike:g} call listed for {ticker} {resolved}. Nearest strikes: {hint}.{inc_text}"
+        )
+
+    quote = market.get("quote") or {}
+    gamma_inputs = market.get("gamma_inputs") or {}
+    earnings = market.get("earnings") or {}
+    spot = gamma_inputs.get("stock_price")
+    if spot is None:
+        raise CalcInputError(f"Couldn't fetch a current price for {ticker} from Yahoo. Try again shortly.")
+
+    if premium is not None:
+        used_premium, premium_source = premium, "manual --premium"
+    elif quote.get("mid") is not None:
+        used_premium, premium_source = quote["mid"], "Yahoo bid/ask midpoint"
+    else:
+        raise CalcInputError(
+            f"No two-sided Yahoo quote for {ticker} {resolved} ${strike:g}C (market closed or illiquid). "
+            "Pass --premium with your broker's midpoint."
+        )
+
+    # yfinance occasionally reports placeholder IVs near zero for stale contracts — ignore those.
+    iv_pct, iv_source = quote.get("implied_volatility"), "Yahoo option chain"
+    if iv_pct is None or iv_pct < 1.0:
+        iv_pct = market.get("realized_volatility")
+        iv_source = "1Y realized volatility (no usable option IV)" if iv_pct is not None else None
+
+    # Yahoo's calendar sometimes still lists the report that just happened; project the next
+    # one a quarter later rather than reading a past date as "earnings imminent".
+    earnings_date, days_to_earnings = earnings.get("earnings_date"), earnings.get("days_to_earnings")
+    earnings_estimated = False
+    if earnings_date is not None and days_to_earnings is not None and days_to_earnings < 0:
+        from datetime import timedelta
+
+        projected = date.fromisoformat(earnings_date)
+        while projected < date.today():
+            projected += timedelta(days=91)
+        earnings_date, days_to_earnings = projected.isoformat(), (projected - date.today()).days
+        earnings_estimated = True
+
+    days_to_expiry = (date.fromisoformat(resolved) - date.today()).days
+    rate = gamma_inputs.get("risk_free_rate_pct")
+    dividend = gamma_inputs.get("dividend_yield_pct")
+    assumptions = []
+    if rate is None:
+        rate = 4.0
+        assumptions.append("rate assumed 4%")
+    if dividend is None:
+        dividend = 0.0
+        assumptions.append("dividend assumed 0%")
+    greeks = model_greeks("CALL", spot, strike, days_to_expiry, iv_pct, rate, dividend) if iv_pct else None
+    delta_source = None
+    if greeks:
+        delta_source = f"Black–Scholes from {iv_source}, r {rate:.2f}%, q {dividend:.2f}%"
+        if assumptions:
+            delta_source += f" ({', '.join(assumptions)})"
+
+    return CalcInputs(
+        ticker=ticker,
+        strike=strike,
+        expiration=resolved,
+        requested_expiration=expiration,
+        spot=spot,
+        premium=used_premium,
+        premium_source=premium_source,
+        premium_overridden=premium is not None,
+        bid=quote.get("bid"),
+        ask=quote.get("ask"),
+        mid=quote.get("mid"),
+        spread_pct=quote.get("spread_pct"),
+        open_interest=quote.get("open_interest"),
+        volume=quote.get("volume"),
+        iv_pct=iv_pct,
+        iv_source=iv_source,
+        iv_percentile=iv_percentile,
+        delta=greeks["delta"] if greeks else None,
+        delta_source=delta_source,
+        theta=greeks["theta"] if greeks else None,
+        gamma=greeks["gamma"] if greeks else None,
+        vega=greeks["vega"] if greeks else None,
+        earnings_date=earnings_date,
+        days_to_earnings=days_to_earnings,
+        earnings_estimated=earnings_estimated,
+        nav=nav,
+        used_margin=used_margin,
+        paper=paper,
+        existing_leaps=existing,
+    )
+
+
+def _parse_scenario_prices(raw: Optional[str]) -> Optional[list[float]]:
+    if not raw:
+        return None
+    try:
+        prices = [float(p.strip().replace("$", "").replace(",", "")) for p in raw.split(",") if p.strip()]
+    except ValueError:
+        raise CalcInputError(f"--scenarios must be comma-separated prices (e.g. 260,280,300); got '{raw}'.")
+    if not prices or any(p <= 0 for p in prices):
+        raise CalcInputError("--scenarios prices must be positive numbers.")
+    return prices
+
+
+@calc_app.command("leaps")
+def calc_leaps(
+    ticker: str = typer.Argument(..., help="Ticker symbol (e.g. GOOGL)."),
+    strike: float = typer.Option(..., "--strike", help="Call strike price."),
+    expiration: str = typer.Option(..., "--expiration", help="Expiration YYYY-MM-DD (nearest listed expiry is used)."),
+    premium: Optional[float] = typer.Option(None, "--premium", help="Override the Yahoo midpoint premium."),
+    nav: Optional[float] = typer.Option(None, "--nav", help="Portfolio NAV (default: tracked portfolio value)."),
+    margin: Optional[float] = typer.Option(None, "--margin", help="Margin in use, $ (default: `strategy margin` value)."),
+    iv_percentile: Optional[float] = typer.Option(
+        None, "--iv-percentile", help="IV 52-week percentile 0-100 (unknown is treated as high)."
+    ),
+    paper: bool = typer.Option(False, "--paper", help="Paper trade: skip NAV, position-size, phase and margin checks."),
+    compare: Optional[float] = typer.Option(None, "--compare", help="Second strike to compare side-by-side."),
+    output: str = typer.Option("table", "--output", "-o", help="table | json | compact"),
+    save: bool = typer.Option(False, "--save", help="Save the evaluation to SQLite history."),
+    chart: bool = typer.Option(False, "--chart", help="Render an ASCII payoff diagram."),
+    scenarios: Optional[str] = typer.Option(None, "--scenarios", help="Comma-separated stock prices, e.g. 260,280,300."),
+) -> None:
+    """Should I buy this LEAPS right now? Checks a call against the locked LEAPS framework."""
+    import json
+    from datetime import date
+
+    from . import data, display
+    from .leaps import load_leaps
+    from .leaps_calc import ExistingLeaps, evaluate_leaps
+    from .leaps_eval_history import evaluation_to_dict, save_evaluation
+
+    ticker = ticker.upper()
+    output = output.lower()
+    if output not in ("table", "json", "compact"):
+        err_console.print("[red]--output must be one of: table, json, compact.[/red]")
+        raise typer.Exit(1)
+    try:
+        date.fromisoformat(expiration)
+    except ValueError:
+        err_console.print(f"[red]--expiration must be YYYY-MM-DD; got '{expiration}'.[/red]")
+        raise typer.Exit(1)
+    if iv_percentile is not None and not 0 <= iv_percentile <= 100:
+        err_console.print("[red]--iv-percentile must be between 0 and 100.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        scenario_prices = _parse_scenario_prices(scenarios)
+        if nav is None and not paper:
+            with err_console.status("Fetching portfolio value for NAV..."):
+                nav = _leaps_portfolio_value()
+            if nav is None:
+                raise CalcInputError(
+                    "Couldn't determine portfolio NAV (no tracked portfolio, or a holding has no price). "
+                    "Pass --nav <AMOUNT>, or use --paper to skip NAV-based rules."
+                )
+        used_margin = margin if margin is not None else data.get_used_margin()
+        existing = [
+            ExistingLeaps(p.ticker, p.strike, p.expiration, p.premium, p.option_type)
+            for p in load_leaps().active_positions()
+        ]
+        strikes = [strike] + ([compare] if compare is not None else [])
+        evaluations = []
+        for s in strikes:
+            with err_console.status(f"Fetching {ticker} ${s:g}C option data..."):
+                inputs = _build_calc_inputs(
+                    ticker, s, expiration, premium if s == strike else None,
+                    nav, used_margin, iv_percentile, paper, existing,
+                )
+            evaluations.append(evaluate_leaps(inputs, scenario_prices))
+    except CalcInputError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    if output == "json":
+        payload = [evaluation_to_dict(ev) for ev in evaluations]
+        typer.echo(json.dumps(payload[0] if len(payload) == 1 else {"primary": payload[0], "compare": payload[1]},
+                              indent=2, default=str))
+    elif output == "compact":
+        for ev in evaluations:
+            typer.echo(display.format_leaps_calc_compact(ev))
+    else:
+        display.render_leaps_calc(evaluations[0])
+        if chart:
+            console.print()
+            display.render_leaps_payoff_chart(evaluations[0])
+        if len(evaluations) > 1:
+            console.print()
+            display.render_leaps_calc_compare(evaluations[0], evaluations[1])
+
+    if save:
+        for ev in evaluations:
+            row_id = save_evaluation(ev)
+            err_console.print(f"[dim]Saved evaluation #{row_id} ({ev.contract_label}, {ev.verdict}).[/dim]")
+
+
+@calc_history_app.command("leaps")
+def calc_history_leaps(
+    ticker: Optional[str] = typer.Option(None, "--ticker", help="Filter by ticker."),
+    limit: int = typer.Option(20, "--limit", help="Max rows to show."),
+) -> None:
+    """List saved `calc leaps --save` evaluations, newest first."""
+    from . import display
+    from .leaps_eval_history import list_evaluations
+
+    display.render_leaps_eval_history(list_evaluations(ticker=ticker, limit=limit))
+
+
+# ---------------------------------------------------------------------------
 # vstock docs  — quick-reference guide
 # ---------------------------------------------------------------------------
 
@@ -1588,6 +1838,8 @@ def docs() -> None:
         ("leaps show ID|TICKER",          "Detail panel for one LEAPS position",              ""),
         ("leaps update ID|TICKER",        "Refresh Greeks and Yahoo option quote",            ""),
         ("leaps remove ID|TICKER",        "Close (not delete) a LEAPS position",              ""),
+        ("calc leaps TICKER --strike --expiration", "LEAPS decision analyzer: rule checklist + verdict", "--paper --compare --chart --save -o json|compact"),
+        ("calc history leaps",            "Saved LEAPS evaluations (SQLite)",                 "--ticker  --limit"),
     ]
     for cmd, desc, flags in rows:
         cmd_table.add_row(f"vstock {cmd}", desc, flags)

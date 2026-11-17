@@ -87,3 +87,31 @@ class VegaImpactTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VegaPreTradeLinesTests(unittest.TestCase):
+    """leaps add shows vega before the save prompt — no since-entry block, % of cost shown."""
+
+    def test_pre_trade_skips_since_entry_and_shows_pct_of_cost(self):
+        from vstock.display import _leaps_vega_lines
+
+        position = make_position(entry_iv=30.0)
+        impact = build_leaps_vega_impact(make_curve(position), position, current_iv=30.0)
+        cost = position.premium * 100 * position.contracts
+
+        text = "\n".join(_leaps_vega_lines(impact, cost_basis=cost, pre_trade=True))
+
+        self.assertNotIn("since entry", text)
+        self.assertIn("Vega at entry", text)
+        self.assertIn(f"{impact.impact_minus_10 / cost * 100:+.1f}% of $2,000.00 cost", text)
+
+    def test_negative_impacts_carry_dollar_sign(self):
+        from vstock.display import _leaps_vega_lines
+
+        position = make_position(entry_iv=30.0)
+        impact = build_leaps_vega_impact(make_curve(position), position)
+
+        text = "\n".join(_leaps_vega_lines(impact))
+
+        self.assertIn(f"-${abs(impact.impact_minus_10):,.2f}", text)
+        self.assertIn("since entry", text)

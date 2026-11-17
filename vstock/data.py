@@ -1065,3 +1065,70 @@ def _days_to_period(days: int) -> str:
     if days <= 365 * 3:
         return "3y"
     return "5y"
+
+
+def resolve_leaps_expiration(available: list[str], requested: str) -> Optional[str]:
+    """Nearest listed expiration to `requested` (ISO). Ties go to the later date, which keeps
+    more time on the contract. Returns None when the chain lists no expirations."""
+    from datetime import date
+
+    if not available:
+        return None
+    target = date.fromisoformat(requested)
+    return min(
+        available,
+        key=lambda d: (abs((date.fromisoformat(d) - target).days), -date.fromisoformat(d).toordinal()),
+    )
+
+
+def fetch_leaps_calc_inputs(ticker: str, strike: float, expiration: str, option_type: str = "CALL") -> dict:
+    """Market inputs for `vstock calc leaps`. Never raises.
+
+    Resolves the requested expiration to the nearest listed one, checks the strike exists
+    (suggesting the nearest strikes otherwise), then fetches the contract quote, spot +
+    Black–Scholes rate/yield inputs, next earnings date, and realized volatility in parallel.
+    Keys: "expiration", "expirations_available", "strike_found", "nearest_strikes",
+    "strike_increment", "quote", "gamma_inputs", "earnings", "realized_volatility", "error".
+    """
+    result: dict = {"requested_expiration": expiration}
+    try:
+        t = yf.Ticker(ticker)
+        available = list(t.options or [])
+    except Exception:
+        available = []
+    result["expirations_available"] = available
+    resolved = resolve_leaps_expiration(available, expiration)
+    if resolved is None:
+        result["error"] = f"Yahoo lists no option expirations for {ticker}."
+        return result
+    result["expiration"] = resolved
+
+    try:
+        chain = t.option_chain(resolved)
+        contracts = chain.calls if option_type == "CALL" else chain.puts
+        strikes = sorted(float(s) for s in contracts["strike"].dropna().unique())
+    except Exception:
+        strikes = []
+    result["strike_found"] = any(abs(s - strike) < 1e-6 for s in strikes)
+    if not result["strike_found"]:
+        below = [s for s in strikes if s < strike]
+        above = [s for s in strikes if s > strike]
+        result["nearest_strikes"] = [s for s in (below[-1] if below else None, above[0] if above else None) if s is not None]
+        near = [s for s in strikes if abs(s - strike) <= strike * 0.1]
+        diffs = sorted({round(b - a, 2) for a, b in zip(near, near[1:]) if b > a})
+        result["strike_increment"] = diffs[0] if diffs else None
+        return result
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch_leaps_option_quote, ticker, option_type, strike, resolved): "quote",
+            executor.submit(fetch_leaps_gamma_inputs, ticker): "gamma_inputs",
+            executor.submit(fetch_next_earnings_date, ticker): "earnings",
+            executor.submit(fetch_realized_volatility, ticker, "1y"): "realized_volatility",
+        }
+        for future in as_completed(futures):
+            try:
+                result[futures[future]] = future.result()
+            except Exception:
+                result[futures[future]] = None
+    return result
